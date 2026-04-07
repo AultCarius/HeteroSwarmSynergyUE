@@ -1,7 +1,7 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
-using UnrealBuildTool;
 using System.IO;
+using UnrealBuildTool;
 
 public class HeteroSwarmSynergyUE : ModuleRules
 {
@@ -9,13 +9,28 @@ public class HeteroSwarmSynergyUE : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+        string projectDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", ".."));
+        string[] mavlinkIncludeCandidates =
+        {
+            Path.Combine(projectDir, "Plugins", "MAVLink", "Source", "ThirdParty", "MAVLinkLibrary", "include"),
+            Path.GetFullPath(Path.Combine(projectDir, "..", "HeteroSwarmSynergyUE", "Plugins", "MAVLink", "Source", "ThirdParty", "MAVLinkLibrary", "include"))
+        };
+
+        foreach (string candidate in mavlinkIncludeCandidates)
+        {
+            if (Directory.Exists(candidate))
+            {
+                PublicIncludePaths.Add(candidate);
+                break;
+            }
+        }
+
         PublicDependencyModuleNames.AddRange(new string[]
         {
             "Core",
             "CoreUObject",
             "Engine",
             "InputCore",
-            "Core",
             "RenderCore",
             "RHI",
             "Sockets",
@@ -27,17 +42,9 @@ public class HeteroSwarmSynergyUE : ModuleRules
 
         PrivateDependencyModuleNames.AddRange(new string[]
         {
-            "Sockets",
-            "Networking",
             "Json",
             "JsonUtilities"
         });
-        string MAVLinkPath = Path.Combine(
-            EngineDirectory,           // D:/Environment/Unreal/UE_4.27/Engine
-            "Source", "ThirdParty",
-            "mavlink"
-        );
-        PublicSystemIncludePaths.Add(MAVLinkPath);
 
         // Uncomment if you are using Slate UI
         // PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });

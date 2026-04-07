@@ -68,8 +68,21 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hetero Swarm|Event Marker")
     bool bDestroyImmediatelyOnDisappear;
 
+    /** 是否自动对所有 PrimitiveComponent 切换 CustomDepth */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hetero Swarm|Event Marker|Highlight")
+    bool bAutoToggleCustomDepth;
+
+    /** 高亮时写入的 Stencil 值（需配合项目中的后处理材质使用） */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hetero Swarm|Event Marker|Highlight",
+        meta = (EditCondition = "bAutoToggleCustomDepth", ClampMin = "0", ClampMax = "255"))
+    int32 HighlightStencilValue;
+
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hetero Swarm|Event Marker")
     FEventMarkerRuntimeState CurrentRuntimeState;
+
+protected:
+    /** 对 Actor 下的 PrimitiveComponent 统一切换 CustomDepth / Stencil */
+    void ApplyHighlightRenderState(bool bEnable);
 
 protected:
     UFUNCTION(BlueprintImplementableEvent, Category = "Hetero Swarm|Event Marker")

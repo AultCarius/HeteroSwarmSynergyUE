@@ -192,7 +192,7 @@ void UHeartbeatManager::CheckTimeouts()
     {
         if (FAgentInfo* Info = AgentCache.Find(SysID))
         {
-            UE_LOG(LogHeartbeatManager, Warning,
+            UE_LOG(LogHeartbeatManager, Log,
                 TEXT("Agent timeout: SystemID=%d (%.1fs since last heartbeat)"),
                 SysID, CurrentTime - Info->LastHeartbeatTime);
 

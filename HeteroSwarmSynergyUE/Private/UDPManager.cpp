@@ -518,6 +518,87 @@ bool UUDPManager::SendJSONMessage(uint16 MessageType,
     return true;
 }
 
+bool UUDPManager::SendBinaryMessage(uint16 MessageType,
+    const TArray<uint8>& Payload,
+    int32 TargetPort,
+    const FString& TargetIP)
+{
+    if (!bIsInitialized)
+    {
+        UE_LOG(LogUDPManager, Warning, TEXT("SendBinaryMessage: UDPManager not initialized"));
+        return false;
+    }
+
+    if (Payload.Num() <= 0)
+    {
+        UE_LOG(LogUDPManager, Warning, TEXT("SendBinaryMessage: empty payload"));
+        return false;
+    }
+
+    if (!SendSocket)
+    {
+        ISocketSubsystem* SocketSub = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+        if (!SocketSub)
+        {
+            UE_LOG(LogUDPManager, Error, TEXT("SendBinaryMessage: SocketSubsystem unavailable"));
+            return false;
+        }
+
+        SendSocket = SocketSub->CreateSocket(NAME_DGram, TEXT("UDPManager_SendSocket"), false);
+        if (!SendSocket)
+        {
+            UE_LOG(LogUDPManager, Error, TEXT("SendBinaryMessage: failed to create send socket"));
+            return false;
+        }
+
+        SendSocket->SetBroadcast(true);
+        SendSocket->SetNonBlocking(true);
+
+        UE_LOG(LogUDPManager, Log, TEXT("SendBinaryMessage: send socket created (lazy init)"));
+    }
+
+    const int32 TotalLen = static_cast<int32>(sizeof(FUDPMessageHeader)) + Payload.Num();
+    TArray<uint8> Frame;
+    Frame.SetNumUninitialized(TotalLen);
+
+    FUDPMessageHeader* Header = reinterpret_cast<FUDPMessageHeader*>(Frame.GetData());
+    Header->MagicNumber = 0xABCD;
+    Header->MessageType = MessageType;
+    Header->PayloadLength = static_cast<uint32>(Payload.Num());
+
+    FMemory::Memcpy(Frame.GetData() + sizeof(FUDPMessageHeader), Payload.GetData(), Payload.Num());
+
+    ISocketSubsystem* SocketSub = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+    TSharedRef<FInternetAddr> TargetAddr = SocketSub->CreateInternetAddr();
+
+    bool bIsValid = false;
+    TargetAddr->SetIp(*TargetIP, bIsValid);
+    if (!bIsValid)
+    {
+        UE_LOG(LogUDPManager, Warning,
+            TEXT("SendBinaryMessage: invalid target IP '%s'"), *TargetIP);
+        return false;
+    }
+    TargetAddr->SetPort(TargetPort);
+
+    int32 BytesSent = 0;
+    const bool bOK = SendSocket->SendTo(Frame.GetData(), TotalLen, BytesSent, *TargetAddr);
+
+    if (!bOK || BytesSent != TotalLen)
+    {
+        UE_LOG(LogUDPManager, Warning,
+            TEXT("SendBinaryMessage: send failed or partial (sent=%d, total=%d, dst=%s:%d)"),
+            BytesSent, TotalLen, *TargetIP, TargetPort);
+        return false;
+    }
+
+    UE_LOG(LogUDPManager, VeryVerbose,
+        TEXT("SendBinaryMessage: OK type=0x%04X bytes=%d dst=%s:%d"),
+        MessageType, TotalLen, *TargetIP, TargetPort);
+
+    return true;
+}
+
 
 // ========== 内部辅助函数 ==========
 

@@ -18,6 +18,8 @@
 #include "MessageDispatcher.h"
 
 // MAVLink v2 官方生成头文件
+// 假设已通过ThirdParty插件集成，include路径由Build.cs中的PublicIncludePaths配置
+// 若IntelliSense报红不必理会，以编译结果为准
 #include "mavlink/heteroswarm/mavlink.h"
 
 #include "UDPManager.generated.h"
@@ -450,6 +452,17 @@ public:
      */
     bool SendJSONMessage(uint16 MessageType,
         const FString& JsonString,
+        int32 TargetPort,
+        const FString& TargetIP = TEXT("255.255.255.255"));
+
+    /**
+     * 将二进制 payload 封装为自定义 UDP 帧并发送到指定端口
+     *
+     * 帧结构：[FUDPMessageHeader 8B][Binary payload]
+     * 该接口用于 legacy 二进制协议发送，例如点云、轨迹、设备状态等。
+     */
+    bool SendBinaryMessage(uint16 MessageType,
+        const TArray<uint8>& Payload,
         int32 TargetPort,
         const FString& TargetIP = TEXT("255.255.255.255"));
 

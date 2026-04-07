@@ -1,6 +1,5 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
-// 项目: 室内外异构编队协同演示验证系统
-// 模块: 传感器系统 - 虚拟激光雷达测试Actor
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// 椤圭洰: 瀹ゅ唴澶栧紓鏋勭紪闃熷崗鍚屾紨绀洪獙璇佺郴缁?// 妯″潡: 浼犳劅鍣ㄧ郴缁?- 铏氭嫙婵€鍏夐浄杈炬祴璇旳ctor
 
 #include "VirtualLidarTestActor.h"
 
@@ -16,6 +15,29 @@ DEFINE_LOG_CATEGORY_STATIC(LogVirtualLidarTestActor, Log, All);
 
 namespace
 {
+    bool TryParseTransportMode(const FString& InValue, EVirtualLidarTransportMode& OutMode)
+    {
+        const FString Normalized = InValue.TrimStartAndEnd().ToLower();
+        if (Normalized == TEXT("legacy") ||
+            Normalized == TEXT("legacy_custom_udp") ||
+            Normalized == TEXT("custom_udp") ||
+            Normalized == TEXT("manager"))
+        {
+            OutMode = EVirtualLidarTransportMode::LegacyCustomUdp;
+            return true;
+        }
+
+        if (Normalized == TEXT("compact") ||
+            Normalized == TEXT("compact_chunked_udp") ||
+            Normalized == TEXT("compact_udp"))
+        {
+            OutMode = EVirtualLidarTransportMode::CompactChunkedUdp;
+            return true;
+        }
+
+        return false;
+    }
+
     bool TryReadVectorFromJsonValue(const TSharedPtr<FJsonValue>& JsonValue, FVector& OutVector)
     {
         if (!JsonValue.IsValid())
@@ -117,26 +139,72 @@ namespace
             TEXT("  \"version\": 1,\n")
             TEXT("  \"description\": \"Virtual lidar simulation and path configuration for HeteroSwarmSynergyUE\",\n")
             TEXT("  \"lidar\": {\n")
+            TEXT("    \"sensor_profile\": {\n")
+            TEXT("      \"model\": \"MID-360\",\n")
+            TEXT("      \"laser_wavelength_nm\": 905.0,\n")
+            TEXT("      \"eye_safety_class\": \"Class 1 (IEC60825-1:2014)\",\n")
+            TEXT("      \"reference_range_10pct_m\": 40.0,\n")
+            TEXT("      \"reference_range_80pct_m\": 70.0,\n")
+            TEXT("      \"near_blind_zone_m\": 0.1,\n")
+            TEXT("      \"fov_horizontal_degrees\": 360.0,\n")
+            TEXT("      \"reference_points_per_second\": 200000,\n")
+            TEXT("      \"reference_scan_frequency_hz\": 10.0,\n")
+            TEXT("      \"reference_vertical_fov_min_deg\": -7.0,\n")
+            TEXT("      \"reference_vertical_fov_max_deg\": 52.0,\n")
+            TEXT("      \"reference_range_random_error_sigma_cm_at_10m\": 2.0,\n")
+            TEXT("      \"reference_range_random_error_sigma_cm_at_0_2m\": 3.0,\n")
+            TEXT("      \"reference_range_random_error_sigma_cm\": 2.0,\n")
+            TEXT("      \"reference_angle_random_error_sigma_deg\": 0.15,\n")
+            TEXT("      \"data_interface\": \"100 BASE-TX Ethernet\",\n")
+            TEXT("      \"time_sync_methods\": [\"IEEE 1588-2008 (PTPv2)\", \"GPS\"],\n")
+            TEXT("      \"anti_interference_supported\": true,\n")
+            TEXT("      \"false_alarm_rate_at_100klx\": \"<0.01%\",\n")
+            TEXT("      \"imu_model\": \"ICM40609\",\n")
+            TEXT("      \"operating_temperature_c\": [-20.0, 55.0],\n")
+            TEXT("      \"protection_rating\": \"IP67\",\n")
+            TEXT("      \"power_w\": 6.5,\n")
+            TEXT("      \"supply_voltage_vdc\": [9.0, 27.0],\n")
+            TEXT("      \"dimensions_mm\": [65.0, 65.0, 60.0],\n")
+            TEXT("      \"weight_g\": 265.0,\n")
+            TEXT("      \"notes\": [\n")
+            TEXT("        \"Laser emitter typical divergence: 25.2 deg horizontal x 8 deg vertical (FWHM).\",\n")
+            TEXT("        \"Targets in the 0.1m to 0.2m range may produce point clouds for reference only.\",\n")
+            TEXT("        \"Point cloud precision may degrade slightly at some positions for low-reflectivity targets.\",\n")
+            TEXT("        \"Range random error test condition: 25C, 80% reflectivity, 10m.\",\n")
+            TEXT("        \"Near-range random error test condition: 25C, 80% reflectivity, 0.2m.\",\n")
+            TEXT("        \"False alarm rate test condition: 100 klx daylight, 25C ambient temperature.\",\n")
+            TEXT("        \"Performance can degrade in high or low temperature, strong vibration, or heavy fog.\",\n")
+            TEXT("        \"Auto-heating mode may raise peak power when ambient temperature is between -20C and 0C.\"\n")
+            TEXT("      ]\n")
+            TEXT("    },\n")
             TEXT("    \"auto_start\": true,\n")
             TEXT("    \"sensor_enabled\": true,\n")
             TEXT("    \"remote_host\": \"127.0.0.1\",\n")
-            TEXT("    \"remote_port\": 15000,\n")
+            TEXT("    \"remote_port\": 10001,\n")
+            TEXT("    \"device_id\": 0,\n")
+            TEXT("    \"transport_mode\": \"legacy_custom_udp\",\n")
             TEXT("    \"frame_name\": \"map\",\n")
-            TEXT("    \"scan_frequency_hz\": 8.0,\n")
-            TEXT("    \"horizontal_sample_count\": 48,\n")
-            TEXT("    \"vertical_sample_count\": 8,\n")
+            TEXT("    \"scan_frequency_hz\": 10.0,\n")
+            TEXT("    \"horizontal_sample_count\": 640,\n")
+            TEXT("    \"vertical_sample_count\": 32,\n")
             TEXT("    \"horizontal_fov_degrees\": 360.0,\n")
-            TEXT("    \"vertical_fov_degrees\": 30.0,\n")
-            TEXT("    \"vertical_center_degrees\": -5.0,\n")
-            TEXT("    \"min_range_meters\": 0.2,\n")
-            TEXT("    \"max_range_meters\": 25.0,\n")
-            TEXT("    \"max_points_per_frame\": 512,\n")
+            TEXT("    \"vertical_fov_degrees\": 59.0,\n")
+            TEXT("    \"vertical_center_degrees\": 22.5,\n")
+            TEXT("    \"scan_origin_offset_cm\": [0.0, 0.0, 0.0],\n")
+            TEXT("    \"min_range_meters\": 0.1,\n")
+            TEXT("    \"max_range_meters\": 40.0,\n")
+            TEXT("    \"max_points_per_frame\": 20000,\n")
             TEXT("    \"replace_existing_point_cloud\": true,\n")
-            TEXT("    \"default_point_size_cm\": 18.0,\n")
-            TEXT("    \"max_packet_payload_bytes\": 1200,\n")
-            TEXT("    \"point_color_rgba\": [1.0, 0.15, 0.05, 1.0],\n")
+            TEXT("    \"default_point_size_cm\": 12.0,\n")
+            TEXT("    \"max_packet_payload_bytes\": 1408,\n")
+            TEXT("    \"point_color_rgba\": [1.0, 0.55, 0.12, 1.0],\n")
             TEXT("    \"draw_debug_rays\": false,\n")
-            TEXT("    \"debug_draw_duration\": 0.05\n")
+            TEXT("    \"debug_draw_duration\": 0.05,\n")
+            TEXT("    \"draw_debug_impact_points\": false,\n")
+            TEXT("    \"max_debug_impact_points\": 3200,\n")
+            TEXT("    \"debug_impact_point_size_cm\": 10.0,\n")
+            TEXT("    \"debug_impact_draw_duration\": 0.3,\n")
+            TEXT("    \"debug_impact_color_rgba\": [1.0, 0.45, 0.08, 1.0]\n")
             TEXT("  },\n")
             TEXT("  \"path\": {\n")
             TEXT("    \"enabled\": true,\n")
@@ -145,32 +213,37 @@ namespace
             TEXT("    \"draw_debug_path\": true,\n")
             TEXT("    \"start_at_first_point\": true,\n")
             TEXT("    \"points_are_world_space\": false,\n")
-            TEXT("    \"origin_cm\": [0.0, 0.0, 150.0],\n")
-            TEXT("    \"move_speed_cm_per_sec\": 220.0,\n")
-            TEXT("    \"reach_threshold_cm\": 18.0,\n")
+            TEXT("    \"origin_cm\": [0.0, 0.0, 120.0],\n")
+            TEXT("    \"move_speed_cm_per_sec\": 170.0,\n")
+            TEXT("    \"reach_threshold_cm\": 15.0,\n")
             TEXT("    \"visualization\": {\n")
             TEXT("      \"line_color_rgba\": [0.24, 0.86, 1.0, 1.0],\n")
             TEXT("      \"active_waypoint_color_rgba\": [1.0, 0.9, 0.18, 1.0],\n")
             TEXT("      \"label_color_rgba\": [0.92, 0.98, 1.0, 1.0],\n")
-            TEXT("      \"sensor_marker_color_rgba\": [0.08, 0.1, 0.12, 1.0],\n")
-            TEXT("      \"line_thickness\": 2.5,\n")
-            TEXT("      \"waypoint_radius_cm\": 12.0,\n")
-            TEXT("      \"active_waypoint_radius_cm\": 20.0,\n")
-            TEXT("      \"direction_arrow_size_cm\": 70.0,\n")
-            TEXT("      \"sensor_marker_radius_cm\": 22.0,\n")
+            TEXT("      \"sensor_marker_color_rgba\": [1.0, 0.45, 0.08, 1.0],\n")
+            TEXT("      \"line_thickness\": 3.0,\n")
+            TEXT("      \"waypoint_radius_cm\": 14.0,\n")
+            TEXT("      \"active_waypoint_radius_cm\": 24.0,\n")
+            TEXT("      \"direction_arrow_size_cm\": 90.0,\n")
+            TEXT("      \"sensor_marker_radius_cm\": 42.0,\n")
             TEXT("      \"label_height_cm\": 32.0,\n")
             TEXT("      \"draw_waypoint_labels\": true,\n")
             TEXT("      \"draw_direction_arrows\": true,\n")
-            TEXT("      \"draw_sensor_marker\": true\n")
+            TEXT("      \"draw_sensor_marker\": true,\n")
+            TEXT("      \"draw_sensor_label\": true,\n")
+            TEXT("      \"sensor_label_text\": \"MID-360\",\n")
+            TEXT("      \"sensor_label_height_cm\": 70.0,\n")
+            TEXT("      \"draw_sensor_forward_arrow\": true,\n")
+            TEXT("      \"sensor_forward_arrow_length_cm\": 120.0\n")
             TEXT("    },\n")
             TEXT("    \"points_cm\": [\n")
-            TEXT("      [0.0, 0.0, 0.0],\n")
-            TEXT("      [600.0, 0.0, 60.0],\n")
-            TEXT("      [760.0, 420.0, 80.0],\n")
-            TEXT("      [300.0, 760.0, 40.0],\n")
-            TEXT("      [-260.0, 620.0, 20.0],\n")
-            TEXT("      [-520.0, 160.0, 60.0],\n")
-            TEXT("      [-120.0, -260.0, 30.0]\n")
+            TEXT("      [-260.0, -120.0, 35.0],\n")
+            TEXT("      [0.0, -300.0, 30.0],\n")
+            TEXT("      [300.0, -120.0, 45.0],\n")
+            TEXT("      [340.0, 220.0, 40.0],\n")
+            TEXT("      [40.0, 360.0, 28.0],\n")
+            TEXT("      [-280.0, 250.0, 32.0],\n")
+            TEXT("      [-360.0, 30.0, 42.0]\n")
             TEXT("    ]\n")
             TEXT("  }\n")
             TEXT("}\n");
@@ -184,21 +257,26 @@ AVirtualLidarTestActor::AVirtualLidarTestActor()
     , bDrawDebugPath(true)
     , bStartAtFirstPathPoint(true)
     , bPathPointsAreWorldSpace(false)
-    , PathMoveSpeedCmPerSecond(220.0f)
-    , PathReachThresholdCm(18.0f)
+    , PathMoveSpeedCmPerSecond(170.0f)
+    , PathReachThresholdCm(15.0f)
     , bDrawPathLabels(true)
     , bDrawPathDirectionArrows(true)
     , bDrawSensorMarker(true)
-    , PathLineThickness(2.5f)
-    , PathWaypointRadiusCm(12.0f)
-    , PathActiveWaypointRadiusCm(20.0f)
-    , PathDirectionArrowSizeCm(70.0f)
-    , PathSensorMarkerRadiusCm(22.0f)
+    , PathLineThickness(3.0f)
+    , PathWaypointRadiusCm(14.0f)
+    , PathActiveWaypointRadiusCm(24.0f)
+    , PathDirectionArrowSizeCm(90.0f)
+    , PathSensorMarkerRadiusCm(42.0f)
     , PathLabelHeightCm(32.0f)
+    , bDrawSensorLabel(true)
+    , bDrawSensorForwardArrow(true)
+    , PathSensorLabelHeightCm(70.0f)
+    , PathSensorForwardArrowLengthCm(120.0f)
+    , PathSensorLabelText(TEXT("MID-360"))
     , PathLineColor(FLinearColor(0.24f, 0.86f, 1.0f, 1.0f))
     , PathActiveWaypointColor(FLinearColor(1.0f, 0.9f, 0.18f, 1.0f))
     , PathLabelColor(FLinearColor(0.92f, 0.98f, 1.0f, 1.0f))
-    , PathSensorMarkerColor(FLinearColor(0.08f, 0.1f, 0.12f, 1.0f))
+    , PathSensorMarkerColor(FLinearColor(1.0f, 0.45f, 0.08f, 1.0f))
     , CurrentTargetWaypointIndex(INDEX_NONE)
 {
     PrimaryActorTick.bCanEverTick = true;
@@ -300,21 +378,26 @@ void AVirtualLidarTestActor::ApplyDefaultFallbackSettings()
     bDrawDebugPath = true;
     bStartAtFirstPathPoint = true;
     bPathPointsAreWorldSpace = false;
-    PathMoveSpeedCmPerSecond = 220.0f;
-    PathReachThresholdCm = 18.0f;
+    PathMoveSpeedCmPerSecond = 170.0f;
+    PathReachThresholdCm = 15.0f;
     bDrawPathLabels = true;
     bDrawPathDirectionArrows = true;
     bDrawSensorMarker = true;
-    PathLineThickness = 2.5f;
-    PathWaypointRadiusCm = 12.0f;
-    PathActiveWaypointRadiusCm = 20.0f;
-    PathDirectionArrowSizeCm = 70.0f;
-    PathSensorMarkerRadiusCm = 22.0f;
+    PathLineThickness = 3.0f;
+    PathWaypointRadiusCm = 14.0f;
+    PathActiveWaypointRadiusCm = 24.0f;
+    PathDirectionArrowSizeCm = 90.0f;
+    PathSensorMarkerRadiusCm = 42.0f;
     PathLabelHeightCm = 32.0f;
+    bDrawSensorLabel = true;
+    bDrawSensorForwardArrow = true;
+    PathSensorLabelHeightCm = 70.0f;
+    PathSensorForwardArrowLengthCm = 120.0f;
+    PathSensorLabelText = TEXT("MID-360");
     PathLineColor = FLinearColor(0.24f, 0.86f, 1.0f, 1.0f);
     PathActiveWaypointColor = FLinearColor(1.0f, 0.9f, 0.18f, 1.0f);
     PathLabelColor = FLinearColor(0.92f, 0.98f, 1.0f, 1.0f);
-    PathSensorMarkerColor = FLinearColor(0.08f, 0.1f, 0.12f, 1.0f);
+    PathSensorMarkerColor = FLinearColor(1.0f, 0.45f, 0.08f, 1.0f);
 
     if (!VirtualLidarComponent)
     {
@@ -324,24 +407,34 @@ void AVirtualLidarTestActor::ApplyDefaultFallbackSettings()
     VirtualLidarComponent->bAutoStart = true;
     VirtualLidarComponent->bSensorEnabled = true;
     VirtualLidarComponent->RemoteHost = TEXT("127.0.0.1");
-    VirtualLidarComponent->RemotePort = 15000;
+    VirtualLidarComponent->RemotePort = 10001;
+    VirtualLidarComponent->DeviceID = 0;
+    VirtualLidarComponent->TransportMode = EVirtualLidarTransportMode::LegacyCustomUdp;
     VirtualLidarComponent->FrameName = TEXT("map");
-    VirtualLidarComponent->ScanFrequencyHz = 8.0f;
-    VirtualLidarComponent->HorizontalSampleCount = 48;
-    VirtualLidarComponent->VerticalSampleCount = 8;
+    VirtualLidarComponent->ScanFrequencyHz = 10.0f;
+    VirtualLidarComponent->HorizontalSampleCount = 640;
+    VirtualLidarComponent->VerticalSampleCount = 32;
     VirtualLidarComponent->HorizontalFovDegrees = 360.0f;
-    VirtualLidarComponent->VerticalFovDegrees = 30.0f;
-    VirtualLidarComponent->VerticalCenterDegrees = -5.0f;
-    VirtualLidarComponent->MinRangeMeters = 0.2f;
-    VirtualLidarComponent->MaxRangeMeters = 25.0f;
+    VirtualLidarComponent->VerticalFovDegrees = 59.0f;
+    VirtualLidarComponent->VerticalCenterDegrees = 22.5f;
+    VirtualLidarComponent->ScanOriginOffsetCm = FVector::ZeroVector;
+    VirtualLidarComponent->MinRangeMeters = 0.1f;
+    VirtualLidarComponent->MaxRangeMeters = 40.0f;
     VirtualLidarComponent->bIgnoreOwner = true;
-    VirtualLidarComponent->MaxPointsPerFrame = 512;
+    VirtualLidarComponent->MaxPointsPerFrame = 20000;
     VirtualLidarComponent->bReplaceExistingPointCloud = true;
-    VirtualLidarComponent->DefaultPointSizeCm = 18.0f;
-    VirtualLidarComponent->MaxPacketPayloadBytes = 1200;
-    VirtualLidarComponent->PointColor = FLinearColor(1.0f, 0.15f, 0.05f, 1.0f);
+    VirtualLidarComponent->DefaultPointSizeCm = 12.0f;
+    VirtualLidarComponent->MaxPacketPayloadBytes = 1408;
+    VirtualLidarComponent->PointColor = FLinearColor(1.0f, 0.55f, 0.12f, 1.0f);
     VirtualLidarComponent->bDrawDebugRays = false;
     VirtualLidarComponent->DebugDrawDuration = 0.05f;
+    // Keep sender-side impact points disabled by default so the scene only shows
+    // one point cloud visualization path during normal demos.
+    VirtualLidarComponent->bDrawDebugImpactPoints = false;
+    VirtualLidarComponent->MaxDebugImpactPoints = 3200;
+    VirtualLidarComponent->DebugImpactPointSizeCm = 10.0f;
+    VirtualLidarComponent->DebugImpactDrawDuration = 0.3f;
+    VirtualLidarComponent->DebugImpactPointColor = FLinearColor(1.0f, 0.45f, 0.08f, 1.0f);
 }
 
 bool AVirtualLidarTestActor::EnsureDefaultConfigFileExists(const FString& AbsoluteConfigPath) const
@@ -409,6 +502,18 @@ bool AVirtualLidarTestActor::LoadConfigFromJsonFile(const FString& AbsoluteConfi
         {
             VirtualLidarComponent->RemotePort = FMath::Clamp(FMath::RoundToInt(NumberValue), 1, 65535);
         }
+        if (LidarObject->TryGetNumberField(TEXT("device_id"), NumberValue))
+        {
+            VirtualLidarComponent->DeviceID = FMath::Clamp(FMath::RoundToInt(NumberValue), 0, MAX_int32);
+        }
+        if (LidarObject->TryGetStringField(TEXT("transport_mode"), StringValue))
+        {
+            EVirtualLidarTransportMode TransportMode = EVirtualLidarTransportMode::LegacyCustomUdp;
+            if (TryParseTransportMode(StringValue, TransportMode))
+            {
+                VirtualLidarComponent->TransportMode = TransportMode;
+            }
+        }
         if (LidarObject->TryGetStringField(TEXT("frame_name"), StringValue))
         {
             VirtualLidarComponent->FrameName = StringValue;
@@ -419,11 +524,11 @@ bool AVirtualLidarTestActor::LoadConfigFromJsonFile(const FString& AbsoluteConfi
         }
         if (LidarObject->TryGetNumberField(TEXT("horizontal_sample_count"), NumberValue))
         {
-            VirtualLidarComponent->HorizontalSampleCount = FMath::Clamp(FMath::RoundToInt(NumberValue), 1, 256);
+            VirtualLidarComponent->HorizontalSampleCount = FMath::Clamp(FMath::RoundToInt(NumberValue), 1, 2048);
         }
         if (LidarObject->TryGetNumberField(TEXT("vertical_sample_count"), NumberValue))
         {
-            VirtualLidarComponent->VerticalSampleCount = FMath::Clamp(FMath::RoundToInt(NumberValue), 1, 64);
+            VirtualLidarComponent->VerticalSampleCount = FMath::Clamp(FMath::RoundToInt(NumberValue), 1, 128);
         }
         if (LidarObject->TryGetNumberField(TEXT("horizontal_fov_degrees"), NumberValue))
         {
@@ -437,6 +542,13 @@ bool AVirtualLidarTestActor::LoadConfigFromJsonFile(const FString& AbsoluteConfi
         {
             VirtualLidarComponent->VerticalCenterDegrees = FMath::Clamp(static_cast<float>(NumberValue), -45.0f, 45.0f);
         }
+        {
+            FVector VectorValue = FVector::ZeroVector;
+            if (TryReadVectorField(LidarObject, TEXT("scan_origin_offset_cm"), VectorValue))
+            {
+                VirtualLidarComponent->ScanOriginOffsetCm = VectorValue;
+            }
+        }
         if (LidarObject->TryGetNumberField(TEXT("min_range_meters"), NumberValue))
         {
             VirtualLidarComponent->MinRangeMeters = FMath::Clamp(static_cast<float>(NumberValue), 0.01f, 5.0f);
@@ -447,7 +559,7 @@ bool AVirtualLidarTestActor::LoadConfigFromJsonFile(const FString& AbsoluteConfi
         }
         if (LidarObject->TryGetNumberField(TEXT("max_points_per_frame"), NumberValue))
         {
-            VirtualLidarComponent->MaxPointsPerFrame = FMath::Clamp(FMath::RoundToInt(NumberValue), 1, 4000);
+            VirtualLidarComponent->MaxPointsPerFrame = FMath::Clamp(FMath::RoundToInt(NumberValue), 1, 50000);
         }
         if (LidarObject->TryGetBoolField(TEXT("replace_existing_point_cloud"), BoolValue))
         {
@@ -473,6 +585,26 @@ bool AVirtualLidarTestActor::LoadConfigFromJsonFile(const FString& AbsoluteConfi
         {
             VirtualLidarComponent->DebugDrawDuration = FMath::Clamp(static_cast<float>(NumberValue), 0.0f, 2.0f);
         }
+        if (LidarObject->TryGetBoolField(TEXT("draw_debug_impact_points"), BoolValue))
+        {
+            VirtualLidarComponent->bDrawDebugImpactPoints = BoolValue;
+        }
+        if (LidarObject->TryGetNumberField(TEXT("max_debug_impact_points"), NumberValue))
+        {
+            VirtualLidarComponent->MaxDebugImpactPoints = FMath::Clamp(FMath::RoundToInt(NumberValue), 1, 20000);
+        }
+        if (LidarObject->TryGetNumberField(TEXT("debug_impact_point_size_cm"), NumberValue))
+        {
+            VirtualLidarComponent->DebugImpactPointSizeCm = FMath::Clamp(static_cast<float>(NumberValue), 1.0f, 30.0f);
+        }
+        if (LidarObject->TryGetNumberField(TEXT("debug_impact_draw_duration"), NumberValue))
+        {
+            VirtualLidarComponent->DebugImpactDrawDuration = FMath::Clamp(static_cast<float>(NumberValue), 0.0f, 2.0f);
+        }
+        if (TryReadColorField(LidarObject, TEXT("debug_impact_color_rgba"), ColorValue))
+        {
+            VirtualLidarComponent->DebugImpactPointColor = ColorValue;
+        }
     }
 
     const TSharedPtr<FJsonObject>* PathObjectPtr = nullptr;
@@ -482,6 +614,7 @@ bool AVirtualLidarTestActor::LoadConfigFromJsonFile(const FString& AbsoluteConfi
 
         bool BoolValue = false;
         double NumberValue = 0.0;
+        FString StringValue;
         FVector PathOrigin = GetActorLocation();
         PathObject->TryGetBoolField(TEXT("enabled"), bPathEnabled);
         if (PathObject->TryGetBoolField(TEXT("loop"), BoolValue))
@@ -550,6 +683,18 @@ bool AVirtualLidarTestActor::LoadConfigFromJsonFile(const FString& AbsoluteConfi
             {
                 bDrawSensorMarker = BoolValue;
             }
+            if (VisualizationObject->TryGetBoolField(TEXT("draw_sensor_label"), BoolValue))
+            {
+                bDrawSensorLabel = BoolValue;
+            }
+            if (VisualizationObject->TryGetBoolField(TEXT("draw_sensor_forward_arrow"), BoolValue))
+            {
+                bDrawSensorForwardArrow = BoolValue;
+            }
+            if (VisualizationObject->TryGetStringField(TEXT("sensor_label_text"), StringValue))
+            {
+                PathSensorLabelText = StringValue;
+            }
             if (VisualizationObject->TryGetNumberField(TEXT("line_thickness"), NumberValue))
             {
                 PathLineThickness = FMath::Clamp(static_cast<float>(NumberValue), 0.5f, 20.0f);
@@ -573,6 +718,14 @@ bool AVirtualLidarTestActor::LoadConfigFromJsonFile(const FString& AbsoluteConfi
             if (VisualizationObject->TryGetNumberField(TEXT("label_height_cm"), NumberValue))
             {
                 PathLabelHeightCm = FMath::Clamp(static_cast<float>(NumberValue), 0.0f, 200.0f);
+            }
+            if (VisualizationObject->TryGetNumberField(TEXT("sensor_label_height_cm"), NumberValue))
+            {
+                PathSensorLabelHeightCm = FMath::Clamp(static_cast<float>(NumberValue), 0.0f, 300.0f);
+            }
+            if (VisualizationObject->TryGetNumberField(TEXT("sensor_forward_arrow_length_cm"), NumberValue))
+            {
+                PathSensorForwardArrowLengthCm = FMath::Clamp(static_cast<float>(NumberValue), 10.0f, 400.0f);
             }
         }
 
@@ -690,6 +843,32 @@ void AVirtualLidarTestActor::DrawConfiguredPath() const
             0.0f,
             0,
             FMath::Max(1.0f, PathLineThickness * 0.7f));
+    }
+
+    if (bDrawSensorForwardArrow)
+    {
+        DrawDebugDirectionalArrow(
+            GetWorld(),
+            GetActorLocation(),
+            GetActorLocation() + GetActorForwardVector() * PathSensorForwardArrowLengthCm,
+            FMath::Max(20.0f, PathDirectionArrowSizeCm),
+            SensorMarkerColor,
+            false,
+            0.0f,
+            0,
+            FMath::Max(1.5f, PathLineThickness));
+    }
+
+    if (bDrawSensorLabel)
+    {
+        DrawDebugString(
+            GetWorld(),
+            GetActorLocation() + FVector(0.0f, 0.0f, PathSensorLabelHeightCm),
+            PathSensorLabelText,
+            nullptr,
+            LabelColor,
+            0.0f,
+            false);
     }
 
     for (int32 Index = 0; Index < ConfiguredPathPointsWorld.Num(); ++Index)

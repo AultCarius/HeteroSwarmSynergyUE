@@ -9,13 +9,27 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogTrajectoryVisualizerActor, Log, All);
 
+namespace
+{
+    // UE spline mesh scale is relative to the source mesh width, not an absolute centimeter width.
+    // Feeding raw centimeter values into SetStartScale/SetEndScale makes the default cylinder balloon
+    // into a large ribbon. Normalize against the StarterContent cylinder width instead.
+    constexpr float TrajectorySegmentReferenceWidthCm = 100.0f;
+
+    float ConvertWidthCmToSplineScale(float WidthCm)
+    {
+        const float SafeWidthCm = FMath::Clamp(WidthCm, 0.1f, 200.0f);
+        return FMath::Clamp(SafeWidthCm / TrajectorySegmentReferenceWidthCm, 0.02f, 2.0f);
+    }
+}
+
 ATrajectoryVisualizerActor::ATrajectoryVisualizerActor()
     : TrajectorySegmentMesh(nullptr)
     , PlannedTrajectoryMaterial(nullptr)
     , ActualTrajectoryMaterial(nullptr)
-    , PlannedWidthCm(20.0f)
-    , ActualWidthCm(14.0f)
-    , PlannedVerticalOffsetCm(40.0f)
+    , PlannedWidthCm(8.0f)
+    , ActualWidthCm(5.0f)
+    , PlannedVerticalOffsetCm(25.0f)
     , ActualVerticalOffsetCm(0.0f)
     , ForwardAxis(ESplineMeshAxis::X)
     , RefreshIntervalSeconds(0.20f)
@@ -24,6 +38,7 @@ ATrajectoryVisualizerActor::ATrajectoryVisualizerActor()
     , bHasActualTrajectory(false)
     , TrajectoryManager(nullptr)
     , TimeSinceLastRefresh(0.0f)
+    , bSuppressedMissingSegmentMeshLog(false)
 {
     PrimaryActorTick.bCanEverTick = true;
     PrimaryActorTick.bStartWithTickEnabled = true;
@@ -186,11 +201,17 @@ void ATrajectoryVisualizerActor::RebuildSplineMeshes(
 
     if (!TrajectorySegmentMesh)
     {
-        UE_LOG(LogTrajectoryVisualizerActor, Warning,
-            TEXT("TrajectorySegmentMesh is null for %s, spline meshes will not be created"),
-            *GetName());
+        if (!bSuppressedMissingSegmentMeshLog)
+        {
+            UE_LOG(LogTrajectoryVisualizerActor, Log,
+                TEXT("TrajectorySegmentMesh is null for %s, suppressing spline mesh creation logs"),
+                *GetName());
+            bSuppressedMissingSegmentMeshLog = true;
+        }
         return;
     }
+
+    bSuppressedMissingSegmentMeshLog = false;
 
     for (int32 Index = 0; Index < NumPoints - 1; ++Index)
     {
@@ -222,8 +243,9 @@ void ATrajectoryVisualizerActor::RebuildSplineMeshes(
             Index + 1, EndPos, EndTangent, ESplineCoordinateSpace::Local);
 
         SplineMesh->SetStartAndEnd(StartPos, StartTangent, EndPos, EndTangent);
-        SplineMesh->SetStartScale(FVector2D(WidthCm, WidthCm));
-        SplineMesh->SetEndScale(FVector2D(WidthCm, WidthCm));
+        const float WidthScale = ConvertWidthCmToSplineScale(WidthCm);
+        SplineMesh->SetStartScale(FVector2D(WidthScale, WidthScale));
+        SplineMesh->SetEndScale(FVector2D(WidthScale, WidthScale));
         SplineMesh->RegisterComponent();
 
         SplineMeshes.Add(SplineMesh);

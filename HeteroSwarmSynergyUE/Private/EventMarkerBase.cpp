@@ -2,6 +2,7 @@
 
 #include "EventMarkerBase.h"
 #include "Components/SceneComponent.h"
+#include "Components/PrimitiveComponent.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogEventMarkerBase, Log, All);
 
@@ -11,6 +12,8 @@ AEventMarkerBase::AEventMarkerBase()
     , bHighlighted(false)
     , bHasValidRuntimeState(false)
     , bDestroyImmediatelyOnDisappear(true)
+    , bAutoToggleCustomDepth(true)
+    , HighlightStencilValue(1)
 {
     PrimaryActorTick.bCanEverTick = false;
 
@@ -21,6 +24,8 @@ AEventMarkerBase::AEventMarkerBase()
 void AEventMarkerBase::BeginPlay()
 {
     Super::BeginPlay();
+
+    ApplyHighlightRenderState(bHighlighted);
 
     UE_LOG(LogEventMarkerBase, Log,
         TEXT("EventMarker BeginPlay: %s (EventID=%d EventType=%d)"),
@@ -46,6 +51,8 @@ void AEventMarkerBase::InitializeEventMarker(int32 InEventID, uint8 InEventType)
 
 void AEventMarkerBase::ApplyEventState(const FEventMarkerRuntimeState& InState)
 {
+    EventID = InState.EventID;
+    EventType = InState.EventType;
     CurrentRuntimeState = InState;
     bHasValidRuntimeState = true;
 
@@ -56,6 +63,10 @@ void AEventMarkerBase::ApplyEventState(const FEventMarkerRuntimeState& InState)
     {
         SetHighlighted(bShouldHighlight);
     }
+    else
+    {
+        ApplyHighlightRenderState(bShouldHighlight);
+    }
 
     BP_OnEventStateApplied(CurrentRuntimeState);
 }
@@ -64,10 +75,12 @@ void AEventMarkerBase::SetHighlighted(bool bInHighlighted)
 {
     if (bHighlighted == bInHighlighted)
     {
+        ApplyHighlightRenderState(bInHighlighted);
         return;
     }
 
     bHighlighted = bInHighlighted;
+    ApplyHighlightRenderState(bHighlighted);
 
     UE_LOG(LogEventMarkerBase, Log,
         TEXT("SetHighlighted: Actor=%s EventID=%d Highlighted=%s"),
@@ -78,6 +91,8 @@ void AEventMarkerBase::SetHighlighted(bool bInHighlighted)
 
 void AEventMarkerBase::PlayDisappear()
 {
+    ApplyHighlightRenderState(false);
+
     UE_LOG(LogEventMarkerBase, Log,
         TEXT("PlayDisappear: Actor=%s EventID=%d DestroyImmediately=%s"),
         *GetName(), EventID, bDestroyImmediatelyOnDisappear ? TEXT("true") : TEXT("false"));
@@ -87,5 +102,28 @@ void AEventMarkerBase::PlayDisappear()
     if (bDestroyImmediatelyOnDisappear)
     {
         Destroy();
+    }
+}
+
+void AEventMarkerBase::ApplyHighlightRenderState(bool bEnable)
+{
+    if (!bAutoToggleCustomDepth)
+    {
+        return;
+    }
+
+    TInlineComponentArray<UPrimitiveComponent*> PrimitiveComponents(this);
+    GetComponents<UPrimitiveComponent>(PrimitiveComponents);
+
+    for (UPrimitiveComponent* Primitive : PrimitiveComponents)
+    {
+        if (!IsValid(Primitive))
+        {
+            continue;
+        }
+
+        Primitive->SetRenderCustomDepth(bEnable);
+        Primitive->SetCustomDepthStencilValue(FMath::Clamp(HighlightStencilValue, 0, 255));
+        Primitive->MarkRenderStateDirty();
     }
 }

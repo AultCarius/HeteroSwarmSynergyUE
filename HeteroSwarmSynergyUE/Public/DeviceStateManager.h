@@ -1,10 +1,3 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
-// 项目：室内外异构编队协同演示验证系统
-// 模块：UDP通信 - 业务逻辑层
-// 作者：Carius
-// 日期：2026-02-09
-// 修改：2026-03-13  v2.0 — MAVLink适配，扩展设备状态（四元数/GPS/电量/执行器）
-
 #pragma once
 
 #include "CoreMinimal.h"
@@ -332,6 +325,17 @@ public:
     UFUNCTION(BlueprintPure, Category = "UDP|Device State Manager",
         meta = (DisplayName = "Get Online Device Count"))
     int32 GetOnlineDeviceCount() const;
+
+    /**
+     * 手动设置设备在线状态（供生命周期系统同步使用）
+     *
+     * @param DeviceID MAVLink SystemID
+     * @param bOnline true=在线 false=离线
+     * @return true 表示设备存在且设置成功
+     */
+    UFUNCTION(BlueprintCallable, Category = "UDP|Device State Manager",
+        meta = (DisplayName = "Set Device Online State"))
+    bool SetDeviceOnlineState(int32 DeviceID, bool bOnline);
 
     /**
      * 获取统计信息

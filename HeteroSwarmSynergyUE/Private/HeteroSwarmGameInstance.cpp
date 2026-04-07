@@ -1,24 +1,268 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
-// 修改：2026-03-30  v2.3 — 第3步：事件标记 Actor 映射
-
 #include "HeteroSwarmGameInstance.h"
 #include "UDPManager.h"
 #include "HeartbeatManager.h"
 #include "DeviceStateManager.h"
+#include "DeviceFirstPersonCamera.h"
 #include "EventMarkerManager.h"
 #include "TrajectoryManager.h"
 #include "PointCloudManager.h"
 #include "VirtualLidarTestActor.h"
+#include "CoordinateConverter.h"
 #include "HeteroSwarmAgentBase.h"
 #include "EventMarkerBase.h"
 #include "TrajectoryVisualizerActor.h"
-#include "RTSPCameraActor.h"
 
 #include "Kismet/GameplayStatics.h"
 #include "Containers/Ticker.h"
+#include "Dom/JsonObject.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogHeteroSwarmGameInstance, Log, All);
+
+namespace
+{
+    struct FTrajectoryVerificationConfigData
+    {
+        bool bEnabled = true;
+        bool bEditorOnly = true;
+        int32 DeviceID = 9101;
+        float RefreshSeconds = 2.0f;
+        TArray<FVector> PointsWorldCm;
+        FString StatusMessage;
+    };
+
+    FTrajectoryVerificationConfigData GTrajectoryVerificationConfig;
+    bool GTrajectoryVerificationConfigLoaded = false;
+
+    TArray<FVector> BuildDefaultTrajectoryOffsetsCm()
+    {
+        return {
+            FVector(-550.0f, -260.0f, 0.0f),
+            FVector(-320.0f, -120.0f, 70.0f),
+            FVector(-80.0f, 0.0f, 160.0f),
+            FVector(120.0f, 120.0f, 200.0f),
+            FVector(320.0f, 100.0f, 120.0f),
+            FVector(520.0f, -80.0f, 40.0f),
+            FVector(280.0f, -260.0f, 20.0f),
+            FVector(-40.0f, -320.0f, 90.0f)
+        };
+    }
+
+    FString BuildDefaultTrajectoryVerificationJson()
+    {
+        return FString(
+            TEXT("{\n")
+            TEXT("  \"enabled\": true,\n")
+            TEXT("  \"editor_only\": true,\n")
+            TEXT("  \"device_id\": 9101,\n")
+            TEXT("  \"refresh_seconds\": 2.0,\n")
+            TEXT("  \"points_are_world_space\": false,\n")
+            TEXT("  \"origin_cm\": [0.0, 0.0, 220.0],\n")
+            TEXT("  \"points_cm\": [\n")
+            TEXT("    [-550.0, -260.0, 0.0],\n")
+            TEXT("    [-320.0, -120.0, 70.0],\n")
+            TEXT("    [-80.0, 0.0, 160.0],\n")
+            TEXT("    [120.0, 120.0, 200.0],\n")
+            TEXT("    [320.0, 100.0, 120.0],\n")
+            TEXT("    [520.0, -80.0, 40.0],\n")
+            TEXT("    [280.0, -260.0, 20.0],\n")
+            TEXT("    [-40.0, -320.0, 90.0]\n")
+            TEXT("  ]\n")
+            TEXT("}\n"));
+    }
+
+    FString GetTrajectoryVerificationConfigPath()
+    {
+        return FPaths::ConvertRelativePathToFull(FPaths::ProjectConfigDir() / TEXT("TrajectoryVerification.json"));
+    }
+
+    bool TryReadVectorFromJsonValue(const TSharedPtr<FJsonValue>& JsonValue, FVector& OutVector)
+    {
+        if (!JsonValue.IsValid())
+        {
+            return false;
+        }
+
+        const TArray<TSharedPtr<FJsonValue>>* ArrayValues = nullptr;
+        if (JsonValue->TryGetArray(ArrayValues) && ArrayValues != nullptr && ArrayValues->Num() >= 3)
+        {
+            double X = 0.0;
+            double Y = 0.0;
+            double Z = 0.0;
+            if ((*ArrayValues)[0].IsValid() && (*ArrayValues)[1].IsValid() && (*ArrayValues)[2].IsValid() &&
+                (*ArrayValues)[0]->TryGetNumber(X) &&
+                (*ArrayValues)[1]->TryGetNumber(Y) &&
+                (*ArrayValues)[2]->TryGetNumber(Z))
+            {
+                OutVector = FVector(static_cast<float>(X), static_cast<float>(Y), static_cast<float>(Z));
+                return true;
+            }
+        }
+
+        const TSharedPtr<FJsonObject>* ObjectValue = nullptr;
+        if (JsonValue->TryGetObject(ObjectValue) && ObjectValue != nullptr && ObjectValue->IsValid())
+        {
+            double X = 0.0;
+            double Y = 0.0;
+            double Z = 0.0;
+            if ((*ObjectValue)->TryGetNumberField(TEXT("x"), X) &&
+                (*ObjectValue)->TryGetNumberField(TEXT("y"), Y) &&
+                (*ObjectValue)->TryGetNumberField(TEXT("z"), Z))
+            {
+                OutVector = FVector(static_cast<float>(X), static_cast<float>(Y), static_cast<float>(Z));
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool EnsureDefaultTrajectoryVerificationConfigFileExists(const FString& AbsoluteConfigPath)
+    {
+        if (FPaths::FileExists(AbsoluteConfigPath))
+        {
+            return true;
+        }
+
+        const FString Directory = FPaths::GetPath(AbsoluteConfigPath);
+        if (!Directory.IsEmpty())
+        {
+            IFileManager::Get().MakeDirectory(*Directory, true);
+        }
+
+        return FFileHelper::SaveStringToFile(
+            BuildDefaultTrajectoryVerificationJson(),
+            *AbsoluteConfigPath,
+            FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+    }
+
+    void ResetTrajectoryVerificationConfigFromGameConfig(
+        const FGameInstanceConfig& GameConfig,
+        FTrajectoryVerificationConfigData& OutConfig)
+    {
+        OutConfig = FTrajectoryVerificationConfigData{};
+        OutConfig.bEnabled = GameConfig.bAutoInjectTrajectoryTestData;
+        OutConfig.bEditorOnly = GameConfig.bAutoInjectTrajectoryOnlyInEditor;
+        OutConfig.DeviceID = FMath::Max(1, GameConfig.AutoInjectTrajectoryDeviceID);
+        OutConfig.RefreshSeconds = FMath::Clamp(GameConfig.AutoInjectTrajectoryRefreshSeconds, 0.2f, 30.0f);
+
+        const TArray<FVector> DefaultOffsets = BuildDefaultTrajectoryOffsetsCm();
+        OutConfig.PointsWorldCm.Reserve(DefaultOffsets.Num());
+        for (const FVector& Offset : DefaultOffsets)
+        {
+            OutConfig.PointsWorldCm.Add(GameConfig.AutoInjectTrajectoryOrigin + Offset);
+        }
+    }
+
+    bool LoadTrajectoryVerificationConfig(
+        const FGameInstanceConfig& GameConfig,
+        FTrajectoryVerificationConfigData& OutConfig)
+    {
+        ResetTrajectoryVerificationConfigFromGameConfig(GameConfig, OutConfig);
+
+        const FString ConfigPath = GetTrajectoryVerificationConfigPath();
+        if (!EnsureDefaultTrajectoryVerificationConfigFileExists(ConfigPath))
+        {
+            OutConfig.StatusMessage = FString::Printf(
+                TEXT("Failed to create trajectory verification config: %s"),
+                *ConfigPath);
+            return false;
+        }
+
+        FString JsonText;
+        if (!FFileHelper::LoadFileToString(JsonText, *ConfigPath))
+        {
+            OutConfig.StatusMessage = FString::Printf(
+                TEXT("Failed to load trajectory verification config: %s"),
+                *ConfigPath);
+            return false;
+        }
+
+        TSharedPtr<FJsonObject> RootObject;
+        const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonText);
+        if (!FJsonSerializer::Deserialize(Reader, RootObject) || !RootObject.IsValid())
+        {
+            OutConfig.StatusMessage = FString::Printf(
+                TEXT("Failed to parse trajectory verification config: %s"),
+                *ConfigPath);
+            return false;
+        }
+
+        bool BoolValue = false;
+        double NumberValue = 0.0;
+        FVector OriginCm = GameConfig.AutoInjectTrajectoryOrigin;
+        bool bPointsAreWorldSpace = false;
+
+        if (RootObject->TryGetBoolField(TEXT("enabled"), BoolValue))
+        {
+            OutConfig.bEnabled = BoolValue;
+        }
+        if (RootObject->TryGetBoolField(TEXT("editor_only"), BoolValue))
+        {
+            OutConfig.bEditorOnly = BoolValue;
+        }
+        if (RootObject->TryGetNumberField(TEXT("device_id"), NumberValue))
+        {
+            OutConfig.DeviceID = FMath::Max(1, FMath::RoundToInt(NumberValue));
+        }
+        if (RootObject->TryGetNumberField(TEXT("refresh_seconds"), NumberValue))
+        {
+            OutConfig.RefreshSeconds = FMath::Clamp(static_cast<float>(NumberValue), 0.2f, 30.0f);
+        }
+        if (RootObject->TryGetBoolField(TEXT("points_are_world_space"), BoolValue))
+        {
+            bPointsAreWorldSpace = BoolValue;
+        }
+
+        const TArray<TSharedPtr<FJsonValue>>* OriginArray = nullptr;
+        if (RootObject->TryGetArrayField(TEXT("origin_cm"), OriginArray) &&
+            OriginArray != nullptr &&
+            OriginArray->Num() >= 3)
+        {
+            double X = 0.0;
+            double Y = 0.0;
+            double Z = 0.0;
+            if ((*OriginArray)[0].IsValid() && (*OriginArray)[1].IsValid() && (*OriginArray)[2].IsValid() &&
+                (*OriginArray)[0]->TryGetNumber(X) &&
+                (*OriginArray)[1]->TryGetNumber(Y) &&
+                (*OriginArray)[2]->TryGetNumber(Z))
+            {
+                OriginCm = FVector(static_cast<float>(X), static_cast<float>(Y), static_cast<float>(Z));
+            }
+        }
+
+        const TArray<TSharedPtr<FJsonValue>>* PointsArray = nullptr;
+        if (RootObject->TryGetArrayField(TEXT("points_cm"), PointsArray) &&
+            PointsArray != nullptr &&
+            PointsArray->Num() > 0)
+        {
+            OutConfig.PointsWorldCm.Reset();
+            OutConfig.PointsWorldCm.Reserve(PointsArray->Num());
+
+            for (const TSharedPtr<FJsonValue>& PointValue : *PointsArray)
+            {
+                FVector ParsedPoint;
+                if (!TryReadVectorFromJsonValue(PointValue, ParsedPoint))
+                {
+                    continue;
+                }
+
+                OutConfig.PointsWorldCm.Add(bPointsAreWorldSpace ? ParsedPoint : (OriginCm + ParsedPoint));
+            }
+        }
+
+        OutConfig.StatusMessage = FString::Printf(
+            TEXT("Loaded trajectory verification config from %s"),
+            *ConfigPath);
+
+        return OutConfig.PointsWorldCm.Num() > 0;
+    }
+}
 
 UHeteroSwarmGameInstance::UHeteroSwarmGameInstance()
     : HeartbeatManager(nullptr)
@@ -57,6 +301,44 @@ void UHeteroSwarmGameInstance::Init()
         if (InitializeUDPSystem())
         {
             UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("UDP System auto-initialized successfully"));
+
+            // ===== 调试：模拟一个设备上线（新组件方案）=====
+            HandleAgentOnlineForLifecycle(1, 1);
+
+            if (AActor* TestAgentActor = GetSpawnedAgentActor(1))
+            {
+                TestAgentActor->SetActorLocationAndRotation(
+                    FVector(0.0f, 0.0f, 300.0f),
+                    FRotator::ZeroRotator
+                );
+
+                if (AHeteroSwarmAgentBase* AgentBase = Cast<AHeteroSwarmAgentBase>(TestAgentActor))
+                {
+                    TArray<UDeviceFirstPersonCamera*> Cameras;
+                    AgentBase->GetComponents<UDeviceFirstPersonCamera>(Cameras);
+
+                    if (Cameras.Num() > 0 && IsValid(Cameras[0]))
+                    {
+                        Cameras[0]->StartVideoStream();
+
+                        UE_LOG(LogHeteroSwarmGameInstance, Log,
+                            TEXT("Test device spawned and video stream started: DeviceID=1 Actor=%s Camera=%s"),
+                            *AgentBase->GetName(),
+                            *Cameras[0]->GetName());
+                    }
+                    else
+                    {
+                        UE_LOG(LogHeteroSwarmGameInstance, Warning,
+                            TEXT("Test device spawned, but no DeviceFirstPersonCamera found on Actor=%s"),
+                            *AgentBase->GetName());
+                    }
+                }
+            }
+            else
+            {
+                UE_LOG(LogHeteroSwarmGameInstance, Warning,
+                    TEXT("Test device spawn failed: no spawned agent actor for DeviceID=1"));
+            }
         }
         else
         {
@@ -193,6 +475,19 @@ bool UHeteroSwarmGameInstance::InitializeUDPSystem()
     UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("  Max Packets Per Frame: %d"), Config.MaxPacketsPerFrame);
     UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("  Heartbeat Timeout: %.1fs"), Config.DeviceTimeoutSeconds);
 
+    GTrajectoryVerificationConfigLoaded = LoadTrajectoryVerificationConfig(Config, GTrajectoryVerificationConfig);
+    if (GTrajectoryVerificationConfig.StatusMessage.Len() > 0)
+    {
+        if (GTrajectoryVerificationConfigLoaded)
+        {
+            UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("%s"), *GTrajectoryVerificationConfig.StatusMessage);
+        }
+        else
+        {
+            UE_LOG(LogHeteroSwarmGameInstance, Warning, TEXT("%s"), *GTrajectoryVerificationConfig.StatusMessage);
+        }
+    }
+
     OnUDPSystemInitialized();
 
     EnsureAutoSpawnedVirtualLidarTestActor();
@@ -250,7 +545,6 @@ bool UHeteroSwarmGameInstance::InitializeManagers()
         return false;
     }
 
-    // 1. HeartbeatManager
     HeartbeatManager = NewObject<UHeartbeatManager>(this);
     if (!HeartbeatManager)
     {
@@ -279,7 +573,6 @@ bool UHeteroSwarmGameInstance::InitializeManagers()
         TEXT("HeartbeatManager initialized (timeout=%.1fs), bound to OnMAVLinkHeartbeat and lifecycle handlers"),
         Config.DeviceTimeoutSeconds);
 
-    // 2. DeviceStateManager
     DeviceStateManager = NewObject<UDeviceStateManager>(this);
     if (!DeviceStateManager)
     {
@@ -302,7 +595,6 @@ bool UHeteroSwarmGameInstance::InitializeManagers()
     UE_LOG(LogHeteroSwarmGameInstance, Log,
         TEXT("DeviceStateManager initialized, bound to OnMAVLinkDeviceState and GameInstance actor sync"));
 
-    // 3. EventMarkerManager
     EventMarkerManager = NewObject<UEventMarkerManager>(this);
     if (EventMarkerManager && EventMarkerManager->Initialize(UDPManager))
     {
@@ -322,7 +614,6 @@ bool UHeteroSwarmGameInstance::InitializeManagers()
             TEXT("EventMarkerManager initialized and bound to presentation handlers"));
     }
 
-    // 4. TrajectoryManager
     TrajectoryManager = NewObject<UTrajectoryManager>(this);
     if (TrajectoryManager && TrajectoryManager->Initialize(UDPManager, GetWorld()))
     {
@@ -345,7 +636,6 @@ bool UHeteroSwarmGameInstance::InitializeManagers()
             TEXT("TrajectoryManager initialized, bound to data and presentation delegates"));
     }
 
-    // 5. PointCloudManager
     PointCloudManager = NewObject<UPointCloudManager>(this);
     if (PointCloudManager && PointCloudManager->Initialize(UDPManager, GetWorld()))
     {
@@ -395,7 +685,6 @@ void UHeteroSwarmGameInstance::ShutdownManagers()
         DeviceStateManager->OnDeviceStateChanged.RemoveAll(TrajectoryManager);
     }
 
-    // 新增：解绑 TrajectoryManager -> GameInstance 的表现层委托
     if (TrajectoryManager)
     {
         TrajectoryManager->OnTrajectoryCreated.RemoveAll(this);
@@ -413,10 +702,7 @@ void UHeteroSwarmGameInstance::ShutdownManagers()
 
     DestroyAllSpawnedAgentActors();
     DestroyAllSpawnedEventActors();
-
-    // 新增：销毁所有轨迹可视化 Actor
     DestroyAllSpawnedTrajectoryVisualizers();
-    DestroyAllSpawnedVideoActors();
 
     if (PointCloudManager)
     {
@@ -551,10 +837,12 @@ void UHeteroSwarmGameInstance::HandleAgentOnlineForLifecycle(int32 SystemID, int
         TEXT("HandleAgentOnlineForLifecycle: SystemID=%d DeviceType=%d"),
         SystemID, DeviceType);
 
-    SpawnAgentActorForDevice(SystemID, DeviceType);
+    if (DeviceStateManager)
+    {
+        DeviceStateManager->SetDeviceOnlineState(SystemID, true);
+    }
 
-    // 新增：设备上线时自动生成视频流Actor
-    SpawnVideoActorForDevice(SystemID);
+    SpawnAgentActorForDevice(SystemID, DeviceType);
 }
 
 void UHeteroSwarmGameInstance::HandleAgentOfflineForLifecycle(int32 SystemID)
@@ -564,9 +852,12 @@ void UHeteroSwarmGameInstance::HandleAgentOfflineForLifecycle(int32 SystemID)
         SystemID);
 
     DestroyAgentActorForDevice(SystemID);
+    DestroyTrajectoryVisualizerForDevice(SystemID);
 
-    // 新增：设备离线时自动销毁视频流Actor
-    DestroyVideoActorForDevice(SystemID);
+    if (DeviceStateManager)
+    {
+        DeviceStateManager->SetDeviceOnlineState(SystemID, false);
+    }
 }
 
 void UHeteroSwarmGameInstance::HandleDeviceStateChangedForActors(int32 DeviceID, const FDeviceRuntimeState& State)
@@ -976,6 +1267,7 @@ void UHeteroSwarmGameInstance::PrintSystemStatus() const
     UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("  UDP Initialized: %s"), bIsInitialized ? TEXT("YES") : TEXT("NO"));
     UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("  Spawned Agents : %d"), SpawnedAgentActorMap.Num());
     UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("  Spawned Events : %d"), SpawnedEventActorMap.Num());
+    UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("  Spawned Traj   : %d"), SpawnedTrajectoryVisualizerMap.Num());
     UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("  HeartbeatManager:   %s"), HeartbeatManager ? TEXT("Active") : TEXT("Inactive"));
     UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("  DeviceStateManager: %s"), DeviceStateManager ? TEXT("Active") : TEXT("Inactive"));
     UE_LOG(LogHeteroSwarmGameInstance, Log, TEXT("  EventMarkerManager: %s"), EventMarkerManager ? TEXT("Active") : TEXT("Inactive"));
@@ -1021,7 +1313,7 @@ UUDPManager* UHeteroSwarmGameInstance::GetUDPManager() const
 
 void UHeteroSwarmGameInstance::EnsureAutoSpawnedVirtualLidarTestActor()
 {
-    if (!Config.bAutoSpawnVirtualLidarTestActor)
+    if (!Config.bEnableVerificationHelpers || !Config.bAutoSpawnVirtualLidarTestActor)
     {
         return;
     }
@@ -1039,13 +1331,13 @@ void UHeteroSwarmGameInstance::EnsureAutoSpawnedVirtualLidarTestActor()
             World->WorldType == EWorldType::PIE ||
             World->WorldType == EWorldType::EditorPreview ||
             World->WorldType == EWorldType::GamePreview;
-        if (!bIsEditorWorld)
+        if (!bIsEditorWorld && !Config.bAutoSpawnVirtualLidarInStandaloneGame)
         {
             return;
         }
     }
 #else
-    if (Config.bAutoSpawnVirtualLidarOnlyInEditor)
+    if (Config.bAutoSpawnVirtualLidarOnlyInEditor && !Config.bAutoSpawnVirtualLidarInStandaloneGame)
     {
         return;
     }
@@ -1105,6 +1397,92 @@ void UHeteroSwarmGameInstance::CleanupAutoSpawnedVirtualLidarTestActor()
 
 void UHeteroSwarmGameInstance::EnsureAutoInjectedTrajectoryTestData()
 {
+    if (!Config.bEnableVerificationHelpers || !TrajectoryManager || !bIsInitialized)
+    {
+        return;
+    }
+
+    if (!GTrajectoryVerificationConfigLoaded ||
+        !GTrajectoryVerificationConfig.bEnabled ||
+        GTrajectoryVerificationConfig.PointsWorldCm.Num() <= 0)
+    {
+        return;
+    }
+
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return;
+    }
+
+#if WITH_EDITOR
+    if (GTrajectoryVerificationConfig.bEditorOnly)
+    {
+        const bool bIsEditorWorld =
+            World->WorldType == EWorldType::PIE ||
+            World->WorldType == EWorldType::EditorPreview ||
+            World->WorldType == EWorldType::GamePreview;
+        if (!bIsEditorWorld && !Config.bAutoInjectTrajectoryInStandaloneGame)
+        {
+            return;
+        }
+    }
+#else
+    if (GTrajectoryVerificationConfig.bEditorOnly && !Config.bAutoInjectTrajectoryInStandaloneGame)
+    {
+        return;
+    }
+#endif
+
+    const double CurrentTimeSeconds = FPlatformTime::Seconds();
+    const double RefreshIntervalSeconds = FMath::Max(
+        0.2,
+        static_cast<double>(GTrajectoryVerificationConfig.RefreshSeconds));
+    if ((CurrentTimeSeconds - LastAutoInjectedTrajectoryTimeSeconds) < RefreshIntervalSeconds)
+    {
+        return;
+    }
+
+    LastAutoInjectedTrajectoryTimeSeconds = CurrentTimeSeconds;
+
+    FMAVLinkWaypointsData TestTrajectory;
+    TestTrajectory.SystemID = GTrajectoryVerificationConfig.DeviceID;
+    TestTrajectory.ReceiveTime = static_cast<float>(CurrentTimeSeconds);
+
+    TestTrajectory.Waypoints.Reserve(GTrajectoryVerificationConfig.PointsWorldCm.Num());
+
+    for (const FVector& UEPoint : GTrajectoryVerificationConfig.PointsWorldCm)
+    {
+        const FNEDVector NEDPoint = UCoordinateConverter::UEToNED(UEPoint);
+        TestTrajectory.Waypoints.Add(FVector(NEDPoint.North, NEDPoint.East, NEDPoint.Down));
+    }
+
+    if (UUDPManager* UDPManager = GetSubsystem<UUDPManager>())
+    {
+        UDPManager->OnMAVLinkWaypoints.Broadcast(TestTrajectory);
+
+        if (bHasInjectedTrajectoryTestData)
+        {
+            UE_LOG(
+                LogHeteroSwarmGameInstance,
+                Verbose,
+                TEXT("Refreshed mock MAVLink trajectory for verification: Device=%d, Waypoints=%d"),
+                TestTrajectory.SystemID,
+                TestTrajectory.Waypoints.Num());
+        }
+        else
+        {
+            UE_LOG(
+                LogHeteroSwarmGameInstance,
+                Log,
+                TEXT("Injected mock MAVLink trajectory for verification: Device=%d, Waypoints=%d"),
+                TestTrajectory.SystemID,
+                TestTrajectory.Waypoints.Num());
+        }
+
+        bHasInjectedTrajectoryTestData = true;
+    }
+
     // 第3步阶段先禁用复杂轨迹自动注入
 }
 
@@ -1259,105 +1637,4 @@ void UHeteroSwarmGameInstance::DestroyAllSpawnedTrajectoryVisualizers()
 
     UE_LOG(LogHeteroSwarmGameInstance, Log,
         TEXT("DestroyAllSpawnedTrajectoryVisualizers complete"));
-}
-
-bool UHeteroSwarmGameInstance::SpawnVideoActorForDevice(int32 DeviceID)
-{
-    UWorld* World = GetWorld();
-    if (!World)
-    {
-        UE_LOG(LogHeteroSwarmGameInstance, Warning,
-            TEXT("SpawnVideoActorForDevice failed: World is null (DeviceID=%d)"),
-            DeviceID);
-        return false;
-    }
-
-    if (ARTSPCameraActor** Existing = SpawnedVideoActorMap.Find(DeviceID))
-    {
-        if (IsValid(*Existing))
-        {
-            UE_LOG(LogHeteroSwarmGameInstance, Verbose,
-                TEXT("SpawnVideoActorForDevice skipped: already exists for DeviceID=%d (%s)"),
-                DeviceID, *(*Existing)->GetName());
-            return true;
-        }
-    }
-
-    if (*DefaultRTSPCameraActorClass == nullptr)
-    {
-        UE_LOG(LogHeteroSwarmGameInstance, Warning,
-            TEXT("SpawnVideoActorForDevice failed: DefaultRTSPCameraActorClass is null (DeviceID=%d)"),
-            DeviceID);
-        return false;
-    }
-
-    FVector SpawnLocation = FVector::ZeroVector;
-    FRotator SpawnRotation = FRotator::ZeroRotator;
-
-    // 如果对应设备Actor已经存在，就把视频Actor生成在设备附近
-    if (AActor* AgentActor = GetSpawnedAgentActor(DeviceID))
-    {
-        SpawnLocation = AgentActor->GetActorLocation() + FVector(0.0f, 0.0f, 200.0f);
-        SpawnRotation = AgentActor->GetActorRotation();
-    }
-
-    FActorSpawnParameters SpawnParams;
-    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-    SpawnParams.Name = FName(*FString::Printf(TEXT("RTSPCamera_%d"), DeviceID));
-
-    ARTSPCameraActor* VideoActor = World->SpawnActor<ARTSPCameraActor>(
-        DefaultRTSPCameraActorClass,
-        SpawnLocation,
-        SpawnRotation,
-        SpawnParams);
-
-    if (!VideoActor)
-    {
-        UE_LOG(LogHeteroSwarmGameInstance, Error,
-            TEXT("SpawnVideoActorForDevice failed: SpawnActor returned null (DeviceID=%d)"),
-            DeviceID);
-        return false;
-    }
-
-    SpawnedVideoActorMap.Add(DeviceID, VideoActor);
-
-    UE_LOG(LogHeteroSwarmGameInstance, Log,
-        TEXT("Spawned RTSP camera actor: DeviceID=%d Actor=%s Loc=%s"),
-        DeviceID, *VideoActor->GetName(), *SpawnLocation.ToCompactString());
-
-    return true;
-}
-
-bool UHeteroSwarmGameInstance::DestroyVideoActorForDevice(int32 DeviceID)
-{
-    ARTSPCameraActor** Found = SpawnedVideoActorMap.Find(DeviceID);
-    if (!Found || !IsValid(*Found))
-    {
-        SpawnedVideoActorMap.Remove(DeviceID);
-        return false;
-    }
-
-    UE_LOG(LogHeteroSwarmGameInstance, Log,
-        TEXT("Destroying RTSP camera actor: DeviceID=%d Actor=%s"),
-        DeviceID, *(*Found)->GetName());
-
-    (*Found)->Destroy();
-    SpawnedVideoActorMap.Remove(DeviceID);
-    return true;
-}
-
-void UHeteroSwarmGameInstance::DestroyAllSpawnedVideoActors()
-{
-    TArray<int32> DeviceIDs;
-    SpawnedVideoActorMap.GetKeys(DeviceIDs);
-
-    for (int32 DeviceID : DeviceIDs)
-    {
-        DestroyVideoActorForDevice(DeviceID);
-    }
-
-    SpawnedVideoActorMap.Empty();
-
-    UE_LOG(LogHeteroSwarmGameInstance, Log,
-        TEXT("DestroyAllSpawnedVideoActors complete"));
 }

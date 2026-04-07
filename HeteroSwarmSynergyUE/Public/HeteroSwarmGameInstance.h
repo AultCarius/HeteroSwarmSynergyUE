@@ -1,10 +1,3 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
-// 项目：室内外异构编队协同演示验证系统
-// 模块：游戏实例
-// 作者：Carius
-// 日期：2026-02-09
-// 修改：2026-03-30  v2.3 — 第3步：事件标记 Actor 映射
-
 #pragma once
 
 #include "CoreMinimal.h"
@@ -23,7 +16,6 @@ class UPointCloudManager;
 class AVirtualLidarTestActor;
 class AEventMarkerBase;
 class ATrajectoryVisualizerActor;
-class ARTSPCameraActor;
 
 USTRUCT(BlueprintType)
 struct FGameInstanceConfig
@@ -49,10 +41,16 @@ struct FGameInstanceConfig
     bool bEnableVerboseLogging = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Configuration|Verification")
+    bool bEnableVerificationHelpers = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Configuration|Verification")
     bool bAutoSpawnVirtualLidarTestActor = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Configuration|Verification")
     bool bAutoSpawnVirtualLidarOnlyInEditor = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Configuration|Verification")
+    bool bAutoSpawnVirtualLidarInStandaloneGame = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Configuration|Verification")
     FVector AutoSpawnVirtualLidarLocation = FVector(0.0f, 0.0f, 150.0f);
@@ -62,6 +60,9 @@ struct FGameInstanceConfig
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Configuration|Verification")
     bool bAutoInjectTrajectoryOnlyInEditor = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Configuration|Verification")
+    bool bAutoInjectTrajectoryInStandaloneGame = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Configuration|Verification",
         meta = (ClampMin = "1", ClampMax = "2147483647"))
@@ -199,9 +200,6 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Trajectory Presentation")
     TSubclassOf<ATrajectoryVisualizerActor> DefaultTrajectoryVisualizerActorClass;
 
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Video Presentation")
-    TSubclassOf<ARTSPCameraActor> DefaultRTSPCameraActorClass;
-
 private:
     UPROPERTY()
     UHeartbeatManager* HeartbeatManager;
@@ -229,9 +227,6 @@ private:
 
     UPROPERTY()
     TMap<int32, ATrajectoryVisualizerActor*> SpawnedTrajectoryVisualizerMap;
-
-    UPROPERTY()
-    TMap<int32, ARTSPCameraActor*> SpawnedVideoActorMap;
 
     bool bHasInjectedTrajectoryTestData;
     double LastAutoInjectedTrajectoryTimeSeconds;
@@ -291,10 +286,6 @@ private:
     bool SpawnEventActorForEvent(int32 EventID, uint8 EventType, const FVector& Location);
     bool DestroyEventActorForEvent(int32 EventID);
     void DestroyAllSpawnedEventActors();
-
-    bool SpawnVideoActorForDevice(int32 DeviceID);
-    bool DestroyVideoActorForDevice(int32 DeviceID);
-    void DestroyAllSpawnedVideoActors();
 
     TSubclassOf<AHeteroSwarmAgentBase> FindActorClassByDeviceType(
         int32 DeviceType,

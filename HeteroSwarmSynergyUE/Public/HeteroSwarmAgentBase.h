@@ -110,7 +110,15 @@ protected:
     /** 按 CurrentRuntimeState 更新自身 Transform */
     virtual void UpdateTransformFromRuntimeState(float DeltaSeconds);
 
-    /** 预留：后续由四旋翼/机器狗等子类覆盖执行器可视化 */
+    /**
+     * 每帧驱动执行器可视化。
+     *
+     * 默认实现会转发到 Blueprint 事件 BP_UpdateActuatorVisuals，
+     * 这样不同设备蓝图可以直接读取 CurrentRuntimeState.ActuatorStates
+     * 去驱动螺旋桨、关节、云台等。
+     *
+     * 设备专用 C++ 子类也可以直接覆写此函数。
+     */
     virtual void UpdateActuatorVisuals(float DeltaSeconds);
 
 protected:
@@ -125,4 +133,15 @@ protected:
     /** 蓝图扩展：收到新的运行时状态 */
     UFUNCTION(BlueprintImplementableEvent, Category = "Hetero Swarm|Agent")
     void BP_OnRuntimeStateApplied(const FDeviceRuntimeState& NewState);
+
+    /**
+     * 蓝图扩展：每帧驱动执行器可视化。
+     *
+     * 建议在不同设备蓝图中按约定读取 RuntimeState.ActuatorStates：
+     * - 四旋翼: [0-3] 螺旋桨RPM, [4-6] 云台 Pitch/Roll/Yaw
+     * - 机器狗: [0-11] 12关节角, [12-14] 云台角
+     */
+    UFUNCTION(BlueprintImplementableEvent, Category = "Hetero Swarm|Agent",
+        meta = (DisplayName = "Update Actuator Visuals"))
+    void BP_UpdateActuatorVisuals(const FDeviceRuntimeState& RuntimeState, float DeltaSeconds);
 };

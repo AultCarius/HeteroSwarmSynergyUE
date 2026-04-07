@@ -7,7 +7,9 @@
 #include "CoordinateConverter.h"
 #include "Dom/JsonObject.h"
 #include "DrawDebugHelpers.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/FileHelper.h"
@@ -30,7 +32,7 @@ namespace
     constexpr uint8 CompactPointFormatXYZ32F = 0;
     constexpr uint8 CompactPointFormatXYZ32FRGBA8 = 1;
     constexpr uint8 CompactFlagPointsAreWorldSpace = 1 << 3;
-    constexpr int32 CompactHeaderBytes = 56;
+    constexpr int32 CompactHeaderBytes = 60;
 
     template <typename TValue>
     void AppendRawValue(TArray<uint8>& Buffer, const TValue& Value)
@@ -74,17 +76,20 @@ namespace
             TEXT("  \"compact_receive_buffer_size_bytes\": 4194304,\n")
             TEXT("  \"compact_synthetic_device_id\": 15000,\n")
             TEXT("  \"compact_fragment_timeout_seconds\": 2.0,\n")
-            TEXT("  \"enable_renderer_actor\": true,\n")
+            TEXT("  \"enable_renderer_actor\": false,\n")
             TEXT("  \"renderer_point_size_cm\": 18.0,\n")
+            TEXT("  \"prefer_packet_point_size\": true,\n")
             TEXT("  \"renderer_cloud_scale\": 1.5,\n")
             TEXT("  \"renderer_distance_scaling\": 1200.0,\n")
             TEXT("  \"renderer_override_color\": false,\n")
             TEXT("  \"enable_debug_draw\": true,\n")
-            TEXT("  \"max_debug_draw_points_per_cloud\": 3000,\n")
-            TEXT("  \"debug_draw_point_size\": 14.0,\n")
-            TEXT("  \"cloud_stale_timeout_seconds\": 3.0,\n")
-            TEXT("  \"draw_debug_bounds\": true,\n")
-            TEXT("  \"draw_debug_labels\": true,\n")
+            TEXT("  \"max_debug_draw_points_per_cloud\": 20000,\n")
+            TEXT("  \"debug_draw_point_size\": 16.0,\n")
+            TEXT("  \"cloud_stale_timeout_seconds\": 5.0,\n")
+            TEXT("  \"anchor_compact_preview_to_active_camera\": true,\n")
+            TEXT("  \"compact_preview_anchor_distance_cm\": 250.0,\n")
+            TEXT("  \"draw_debug_bounds\": false,\n")
+            TEXT("  \"draw_debug_labels\": false,\n")
             TEXT("  \"debug_label_height_offset_cm\": 40.0\n")
             TEXT("}\n"));
     }
@@ -126,6 +131,55 @@ namespace
     bool TryGetNumberField(const TSharedPtr<FJsonObject>& Object, const TCHAR* FieldName, double& OutValue)
     {
         return Object.IsValid() && Object->TryGetNumberField(FieldName, OutValue);
+    }
+
+    bool TryGetActiveCameraAnchor(UWorld* World, float AnchorDistanceCm, FVector& OutAnchorLocation)
+    {
+        if (!World)
+        {
+            return false;
+        }
+
+        APlayerController* PlayerController = World->GetFirstPlayerController();
+        if (!PlayerController || !PlayerController->PlayerCameraManager)
+        {
+            return false;
+        }
+
+        const FVector CameraLocation = PlayerController->PlayerCameraManager->GetCameraLocation();
+        const FVector CameraForward = PlayerController->PlayerCameraManager->GetCameraRotation().Vector().GetSafeNormal();
+        if (CameraForward.IsNearlyZero())
+        {
+            return false;
+        }
+
+        OutAnchorLocation = CameraLocation + CameraForward * FMath::Max(50.0f, AnchorDistanceCm);
+        return true;
+    }
+
+    void SanitizePointCloudConfig(FPointCloudManagerConfig& InOutConfig)
+    {
+        InOutConfig.MaxPointsPerCloud = FMath::Clamp(InOutConfig.MaxPointsPerCloud, 1, 500000);
+        InOutConfig.CompactListenPort = FMath::Clamp(InOutConfig.CompactListenPort, 1, 65535);
+        InOutConfig.CompactReceiveBufferSizeBytes = FMath::Clamp(InOutConfig.CompactReceiveBufferSizeBytes, 65536, 16777216);
+        InOutConfig.CompactSyntheticDeviceID = FMath::Max(1, InOutConfig.CompactSyntheticDeviceID);
+        InOutConfig.CompactFragmentTimeoutSeconds = FMath::Clamp(InOutConfig.CompactFragmentTimeoutSeconds, 0.1f, 30.0f);
+        InOutConfig.RendererPointSizeCm = FMath::Clamp(InOutConfig.RendererPointSizeCm, 0.1f, 100.0f);
+        InOutConfig.RendererCloudScale = FMath::Clamp(InOutConfig.RendererCloudScale, 0.001f, 100.0f);
+        InOutConfig.RendererDistanceScaling = FMath::Clamp(InOutConfig.RendererDistanceScaling, 1.0f, 100000.0f);
+        InOutConfig.MaxDebugDrawPointsPerCloud = FMath::Clamp(InOutConfig.MaxDebugDrawPointsPerCloud, 1, 50000);
+        InOutConfig.DebugDrawPointSize = FMath::Clamp(InOutConfig.DebugDrawPointSize, 1.0f, 30.0f);
+        InOutConfig.CloudStaleTimeoutSeconds = FMath::Clamp(InOutConfig.CloudStaleTimeoutSeconds, 0.0f, 60.0f);
+        InOutConfig.CompactPreviewAnchorDistanceCm = FMath::Clamp(InOutConfig.CompactPreviewAnchorDistanceCm, 50.0f, 5000.0f);
+        InOutConfig.DebugLabelHeightOffsetCm = FMath::Clamp(InOutConfig.DebugLabelHeightOffsetCm, 0.0f, 300.0f);
+
+        // Keep the runtime in a single-display mode by default. When both
+        // visualization paths are requested, prefer debug points over the GPU
+        // renderer so the project shows only one point cloud style on screen.
+        if (InOutConfig.bEnableRendererActor && InOutConfig.bEnableDebugDraw)
+        {
+            InOutConfig.bEnableRendererActor = false;
+        }
     }
 
     bool LoadPointCloudConfigFromJson(FPointCloudManagerConfig& InOutConfig, FString& OutStatus)
@@ -201,6 +255,11 @@ namespace
             InOutConfig.RendererPointSizeCm = FMath::Clamp(static_cast<float>(NumberValue), 0.1f, 100.0f);
         }
 
+        if (TryGetBoolField(RootObject, TEXT("prefer_packet_point_size"), BoolValue))
+        {
+            InOutConfig.bPreferPacketPointSize = BoolValue;
+        }
+
         if (TryGetNumberField(RootObject, TEXT("renderer_cloud_scale"), NumberValue))
         {
             InOutConfig.RendererCloudScale = FMath::Clamp(static_cast<float>(NumberValue), 0.001f, 100.0f);
@@ -223,7 +282,7 @@ namespace
 
         if (TryGetNumberField(RootObject, TEXT("max_debug_draw_points_per_cloud"), NumberValue))
         {
-            InOutConfig.MaxDebugDrawPointsPerCloud = FMath::Clamp(FMath::RoundToInt(NumberValue), 1, 10000);
+            InOutConfig.MaxDebugDrawPointsPerCloud = FMath::Clamp(FMath::RoundToInt(NumberValue), 1, 50000);
         }
 
         if (TryGetNumberField(RootObject, TEXT("debug_draw_point_size"), NumberValue))
@@ -234,6 +293,16 @@ namespace
         if (TryGetNumberField(RootObject, TEXT("cloud_stale_timeout_seconds"), NumberValue))
         {
             InOutConfig.CloudStaleTimeoutSeconds = FMath::Clamp(static_cast<float>(NumberValue), 0.0f, 60.0f);
+        }
+
+        if (TryGetBoolField(RootObject, TEXT("anchor_compact_preview_to_active_camera"), BoolValue))
+        {
+            InOutConfig.bAnchorCompactPreviewToActiveCamera = BoolValue;
+        }
+
+        if (TryGetNumberField(RootObject, TEXT("compact_preview_anchor_distance_cm"), NumberValue))
+        {
+            InOutConfig.CompactPreviewAnchorDistanceCm = FMath::Clamp(static_cast<float>(NumberValue), 50.0f, 5000.0f);
         }
 
         if (TryGetBoolField(RootObject, TEXT("draw_debug_bounds"), BoolValue))
@@ -251,6 +320,9 @@ namespace
             InOutConfig.DebugLabelHeightOffsetCm = FMath::Clamp(static_cast<float>(NumberValue), 0.0f, 300.0f);
         }
 
+        const bool bRequestedDualVisualization = InOutConfig.bEnableRendererActor && InOutConfig.bEnableDebugDraw;
+        SanitizePointCloudConfig(InOutConfig);
+
         OutStatus = FString::Printf(
             TEXT("Loaded point cloud config from %s (CompactUDP=%s, Port=%d, Renderer=%s, DebugDraw=%s, StaleTimeout=%.1fs)"),
             *ConfigPath,
@@ -259,6 +331,10 @@ namespace
             InOutConfig.bEnableRendererActor ? TEXT("ON") : TEXT("OFF"),
             InOutConfig.bEnableDebugDraw ? TEXT("ON") : TEXT("OFF"),
             InOutConfig.CloudStaleTimeoutSeconds);
+        if (bRequestedDualVisualization && !InOutConfig.bEnableRendererActor && InOutConfig.bEnableDebugDraw)
+        {
+            OutStatus += TEXT(" [Renderer auto-disabled to keep a single default point-cloud style]");
+        }
         return true;
     }
 }
@@ -311,6 +387,8 @@ bool UPointCloudManager::Initialize(UUDPManager* InUDPManager, UWorld* InWorld)
         UE_LOG(LogPointCloudManager, Warning, TEXT("%s"), *PointCloudConfigStatus);
     }
 
+    // Formal receive path:
+    // FUDPReceiverRunnable -> UDPManager -> MessageType=PointCloudData(0x0004) -> PointCloudManager.
     UDPManager->RegisterMessageHandler(static_cast<uint16>(EUDPMessageType::PointCloudData), this);
 
     if (Config.bEnableCompactUdpReceiver)
@@ -321,6 +399,10 @@ bool UPointCloudManager::Initialize(UUDPManager* InUDPManager, UWorld* InWorld)
     if (Config.bEnableRendererActor)
     {
         EnsureRenderActor();
+    }
+    else
+    {
+        CleanupRenderActor();
     }
 
     bIsInitialized = true;
@@ -379,7 +461,8 @@ void UPointCloudManager::Tick(float DeltaTime)
         RefreshRenderedPointCloud();
     }
 
-    if (Config.bEnableDebugDraw)
+    const bool bUseDebugPointDisplay = Config.bEnableDebugDraw && !Config.bEnableRendererActor;
+    if (bUseDebugPointDisplay)
     {
         DrawDebugPointClouds();
     }
@@ -471,18 +554,7 @@ void UPointCloudManager::SetConfig(const FPointCloudManagerConfig& NewConfig)
         Config.bRendererOverrideColor != NewConfig.bRendererOverrideColor;
 
     Config = NewConfig;
-    Config.MaxPointsPerCloud = FMath::Clamp(Config.MaxPointsPerCloud, 1, 500000);
-    Config.CompactListenPort = FMath::Clamp(Config.CompactListenPort, 1, 65535);
-    Config.CompactReceiveBufferSizeBytes = FMath::Clamp(Config.CompactReceiveBufferSizeBytes, 65536, 16777216);
-    Config.CompactSyntheticDeviceID = FMath::Max(1, Config.CompactSyntheticDeviceID);
-    Config.CompactFragmentTimeoutSeconds = FMath::Clamp(Config.CompactFragmentTimeoutSeconds, 0.1f, 30.0f);
-    Config.RendererPointSizeCm = FMath::Clamp(Config.RendererPointSizeCm, 0.1f, 100.0f);
-    Config.RendererCloudScale = FMath::Clamp(Config.RendererCloudScale, 0.001f, 100.0f);
-    Config.RendererDistanceScaling = FMath::Clamp(Config.RendererDistanceScaling, 1.0f, 100000.0f);
-    Config.MaxDebugDrawPointsPerCloud = FMath::Clamp(Config.MaxDebugDrawPointsPerCloud, 1, 10000);
-    Config.DebugDrawPointSize = FMath::Clamp(Config.DebugDrawPointSize, 1.0f, 30.0f);
-    Config.CloudStaleTimeoutSeconds = FMath::Clamp(Config.CloudStaleTimeoutSeconds, 0.0f, 60.0f);
-    Config.DebugLabelHeightOffsetCm = FMath::Clamp(Config.DebugLabelHeightOffsetCm, 0.0f, 300.0f);
+    SanitizePointCloudConfig(Config);
 
     if (bIsInitialized && bReceiverSettingsChanged)
     {
@@ -558,6 +630,31 @@ void UPointCloudManager::PrintStatistics() const
     UE_LOG(LogPointCloudManager, Log, TEXT("============================================"));
 }
 
+bool UPointCloudManager::SendLegacyPointCloudFrame(
+    int32 DeviceID,
+    const TArray<FVector>& WorldPointsCm,
+    int32 TargetPort,
+    const FString& TargetIP) const
+{
+    if (!UDPManager)
+    {
+        UE_LOG(LogPointCloudManager, Warning, TEXT("SendLegacyPointCloudFrame failed: UDPManager is null"));
+        return false;
+    }
+
+    TArray<uint8> Payload;
+    if (!BuildLegacyPointCloudPayload(DeviceID, WorldPointsCm, Payload))
+    {
+        return false;
+    }
+
+    return UDPManager->SendBinaryMessage(
+        static_cast<uint16>(EUDPMessageType::PointCloudData),
+        Payload,
+        TargetPort,
+        TargetIP);
+}
+
 void UPointCloudManager::ProcessPointCloudData(const uint8* Data, uint32 Length)
 {
     constexpr uint32 HeaderSize = sizeof(uint32) + sizeof(uint32);
@@ -596,6 +693,8 @@ void UPointCloudManager::ProcessPointCloudData(const uint8* Data, uint32 Length)
     TArray<FPointCloudRuntimePoint> RuntimePoints;
     RuntimePoints.Reserve(FMath::Min(PointCount, Config.MaxPointsPerCloud));
 
+    // Legacy point cloud packets are defined in NED meters.
+    // Convert them once here into UE world-space centimeters and keep the runtime cache uniform.
     for (int32 Index = 0; Index < PointCount; ++Index)
     {
         if (RuntimePoints.Num() >= Config.MaxPointsPerCloud)
@@ -620,7 +719,7 @@ void UPointCloudManager::ProcessPointCloudData(const uint8* Data, uint32 Length)
         RuntimePoints.Add(RuntimePoint);
     }
 
-    ApplyPointCloudFrame(DeviceID, RuntimePoints, CurrentTime, TEXT("Legacy0x0004"));
+    ApplyPointCloudFrame(DeviceID, RuntimePoints, CurrentTime, 5.0f, TEXT("Legacy0x0004"));
 }
 
 bool UPointCloudManager::ValidatePointCloudHeader(int32 DeviceID, int32 PointCount) const
@@ -658,13 +757,22 @@ void UPointCloudManager::ProcessPendingCompactDatagrams()
 
         int32 DeviceID = Config.CompactSyntheticDeviceID;
         TArray<FPointCloudRuntimePoint> RuntimePoints;
-        if (DecodeCompactChunkedDatagram(CompletedDatagram, DeviceID, RuntimePoints))
+        float DefaultPointSizeCm = Config.RendererPointSizeCm;
+        if (DecodeCompactChunkedDatagram(CompletedDatagram, DeviceID, RuntimePoints, DefaultPointSizeCm))
         {
             ApplyPointCloudFrame(
                 DeviceID,
                 RuntimePoints,
                 static_cast<float>(FPlatformTime::Seconds()),
+                DefaultPointSizeCm,
                 TEXT("CompactChunkedV1"));
+
+            UE_LOG(LogPointCloudManager, Log,
+                TEXT("Applied compact point cloud frame: Device=%d, Points=%d, Endpoint=%s, PointSize=%.1fcm"),
+                DeviceID,
+                RuntimePoints.Num(),
+                *Datagram.EndpointKey,
+                DefaultPointSizeCm);
         }
     }
 }
@@ -794,6 +902,7 @@ bool UPointCloudManager::TryParseCompactChunkedDatagram(
         !ReadBytes(&Reserved, sizeof(Reserved)) ||
         !ReadBytes(&OutHeader.FrameNameByteCount, sizeof(OutHeader.FrameNameByteCount)) ||
         !ReadBytes(&OutHeader.Sequence, sizeof(OutHeader.Sequence)) ||
+        !ReadBytes(&OutHeader.DeviceID, sizeof(OutHeader.DeviceID)) ||
         !ReadBytes(&OutHeader.PointCount, sizeof(OutHeader.PointCount)) ||
         !ReadBytes(&OutHeader.PayloadBytes, sizeof(OutHeader.PayloadBytes)) ||
         !ReadBytes(&OutHeader.DefaultPointSizeCm, sizeof(OutHeader.DefaultPointSizeCm)) ||
@@ -855,7 +964,8 @@ bool UPointCloudManager::TryParseCompactChunkedDatagram(
 bool UPointCloudManager::DecodeCompactChunkedDatagram(
     const TArray<uint8>& Bytes,
     int32& OutDeviceID,
-    TArray<FPointCloudRuntimePoint>& OutPoints) const
+    TArray<FPointCloudRuntimePoint>& OutPoints,
+    float& OutDefaultPointSizeCm) const
 {
     FCompactChunkHeader Header;
     FString FrameName;
@@ -878,10 +988,17 @@ bool UPointCloudManager::DecodeCompactChunkedDatagram(
         return false;
     }
 
+    // Compact UDP is currently used as a single visible preview stream in this
+    // project. Normalize every compact frame to the configured synthetic device
+    // ID so the scene keeps only one cloud instead of spawning parallel clouds
+    // for differing sender-side device IDs.
     OutDeviceID = FMath::Max(1, Config.CompactSyntheticDeviceID);
+    OutDefaultPointSizeCm = FMath::Clamp(Header.DefaultPointSizeCm, 0.1f, 100.0f);
     OutPoints.Reset();
     OutPoints.Reserve(FMath::Min(static_cast<int32>(Header.PointCount), Config.MaxPointsPerCloud));
 
+    // Compact packets generated by the virtual lidar carry UE world-space points in meters.
+    // The runtime cache stores UE world-space centimeters, so the conversion happens here.
     const bool bPointsAreWorldSpace = (Header.Flags & CompactFlagPointsAreWorldSpace) != 0;
     const FTransform PacketTransform(
         Header.Rotation.GetNormalized(),
@@ -994,7 +1111,7 @@ bool UPointCloudManager::AccumulateCompactFragment(
         return false;
     }
 
-    const FString AssemblyKey = MakeCompactAssemblyKey(Datagram.EndpointKey, Header.Sequence);
+    const FString AssemblyKey = MakeCompactAssemblyKey(Datagram.EndpointKey, Header.DeviceID, Header.Sequence);
 
     auto InitializeAssembly = [&](FCompactFragmentAssembly& Assembly)
     {
@@ -1146,6 +1263,7 @@ bool UPointCloudManager::BuildCompactDatagram(
     AppendRawValue<uint8>(OutBytes, 0);
     AppendRawValue<uint16>(OutBytes, FrameNameByteCount);
     AppendRawValue<uint32>(OutBytes, Header.Sequence);
+    AppendRawValue<uint32>(OutBytes, Header.DeviceID);
     AppendRawValue<uint32>(OutBytes, Header.PointCount);
     AppendRawValue<uint32>(OutBytes, static_cast<uint32>(PayloadBytes));
     AppendRawValue<float>(OutBytes, Header.DefaultPointSizeCm);
@@ -1167,9 +1285,9 @@ bool UPointCloudManager::BuildCompactDatagram(
     return true;
 }
 
-FString UPointCloudManager::MakeCompactAssemblyKey(const FString& EndpointKey, uint32 Sequence) const
+FString UPointCloudManager::MakeCompactAssemblyKey(const FString& EndpointKey, uint32 DeviceID, uint32 Sequence) const
 {
-    return FString::Printf(TEXT("%s|%u"), *EndpointKey, Sequence);
+    return FString::Printf(TEXT("%s|%u|%u"), *EndpointKey, DeviceID, Sequence);
 }
 
 void UPointCloudManager::PruneExpiredCompactFragments()
@@ -1224,6 +1342,7 @@ void UPointCloudManager::EnsureRenderActor()
     {
         PointCloudRenderActor = Cast<APointCloudRenderActor>(ExistingActor);
         bOwnsRenderActor = false;
+        PointCloudRenderActor->SetActorHiddenInGame(false);
         return;
     }
 
@@ -1242,14 +1361,32 @@ void UPointCloudManager::CleanupRenderActor()
 {
     if (!IsValid(PointCloudRenderActor))
     {
-        PointCloudRenderActor = nullptr;
-        bOwnsRenderActor = false;
-        return;
+        if (World)
+        {
+            if (AActor* ExistingActor = UGameplayStatics::GetActorOfClass(World, APointCloudRenderActor::StaticClass()))
+            {
+                PointCloudRenderActor = Cast<APointCloudRenderActor>(ExistingActor);
+                bOwnsRenderActor = false;
+            }
+        }
+
+        if (!IsValid(PointCloudRenderActor))
+        {
+            PointCloudRenderActor = nullptr;
+            bOwnsRenderActor = false;
+            return;
+        }
     }
+
+    PointCloudRenderActor->ClearRenderedCloud();
 
     if (bOwnsRenderActor)
     {
         PointCloudRenderActor->Destroy();
+    }
+    else
+    {
+        PointCloudRenderActor->SetActorHiddenInGame(true);
     }
 
     PointCloudRenderActor = nullptr;
@@ -1283,9 +1420,17 @@ void UPointCloudManager::RefreshRenderedPointCloud()
     TArray<FColor> Colors;
     Positions.Reserve(TotalPointCount);
     Colors.Reserve(TotalPointCount);
+    float EffectivePointSizeCm = FMath::Clamp(Config.RendererPointSizeCm, 0.1f, 100.0f);
 
     for (const auto& Pair : PointCloudCache)
     {
+        if (Config.bPreferPacketPointSize)
+        {
+            EffectivePointSizeCm = FMath::Max(
+                EffectivePointSizeCm,
+                FMath::Clamp(Pair.Value.DefaultPointSizeCm, 0.1f, 100.0f));
+        }
+
         for (const FPointCloudRuntimePoint& Point : Pair.Value.Points)
         {
             Positions.Add(Point.Location);
@@ -1302,21 +1447,86 @@ void UPointCloudManager::RefreshRenderedPointCloud()
     PointCloudRenderActor->UpdateRenderedCloud(
         Positions,
         Colors,
-        Config.RendererPointSizeCm,
+        EffectivePointSizeCm,
         Config.RendererCloudScale,
         Config.RendererDistanceScaling,
         Config.bRendererOverrideColor);
+
+    FBox RenderBounds(EForceInit::ForceInit);
+    for (const FVector& Position : Positions)
+    {
+        RenderBounds += Position;
+    }
+
+    UE_LOG(LogPointCloudManager, Log,
+        TEXT("Rendered point cloud updated: Clouds=%d Points=%d Center=%s Extent=%s PointSize=%.1fcm"),
+        PointCloudCache.Num(),
+        Positions.Num(),
+        *RenderBounds.GetCenter().ToCompactString(),
+        *RenderBounds.GetExtent().ToCompactString(),
+        EffectivePointSizeCm);
 }
 
 void UPointCloudManager::ApplyPointCloudFrame(
     int32 DeviceID,
     const TArray<FPointCloudRuntimePoint>& Points,
     float Timestamp,
+    float DefaultPointSizeCm,
     const TCHAR* SourceLabel)
 {
     if (Points.Num() <= 0)
     {
         return;
+    }
+
+    TArray<FPointCloudRuntimePoint> EffectivePoints = Points;
+    if (Config.bAnchorCompactPreviewToActiveCamera &&
+        DeviceID == Config.CompactSyntheticDeviceID)
+    {
+        FVector AnchorLocation = FVector::ZeroVector;
+        if (TryGetActiveCameraAnchor(World, Config.CompactPreviewAnchorDistanceCm, AnchorLocation))
+        {
+            const FBox SourceBounds = ComputePointCloudBounds(EffectivePoints);
+            if (SourceBounds.IsValid)
+            {
+                const FVector Offset = AnchorLocation - SourceBounds.GetCenter();
+                for (FPointCloudRuntimePoint& Point : EffectivePoints)
+                {
+                    Point.Location += Offset;
+                }
+
+                UE_LOG(LogPointCloudManager, Log,
+                    TEXT("Anchored compact preview cloud to active camera: Device=%d Anchor=%s Offset=%s"),
+                    DeviceID,
+                    *AnchorLocation.ToCompactString(),
+                    *Offset.ToCompactString());
+            }
+        }
+    }
+
+    // Keep only one visible cloud on screen. When a new device/source updates,
+    // clear every other cached cloud before applying the new frame.
+    if (PointCloudCache.Num() > 0)
+    {
+        TArray<int32> OtherDeviceIDs;
+        PointCloudCache.GetKeys(OtherDeviceIDs);
+
+        for (const int32 CachedDeviceID : OtherDeviceIDs)
+        {
+            if (CachedDeviceID == DeviceID)
+            {
+                continue;
+            }
+
+            PointCloudCache.Remove(CachedDeviceID);
+            OnPointCloudCleared.Broadcast(CachedDeviceID);
+
+            UE_LOG(LogPointCloudManager, Log,
+                TEXT("Removed stale parallel point cloud: Device=%d (IncomingDevice=%d Source=%s)"),
+                CachedDeviceID,
+                DeviceID,
+                SourceLabel);
+        }
     }
 
     FDevicePointCloud* PointCloudPtr = PointCloudCache.Find(DeviceID);
@@ -1336,19 +1546,20 @@ void UPointCloudManager::ApplyPointCloudFrame(
 
     check(PointCloudPtr);
 
-    PointCloudPtr->Points = Points;
-    PointCloudPtr->TotalPointsReceived += Points.Num();
+    PointCloudPtr->Points = EffectivePoints;
+    PointCloudPtr->TotalPointsReceived += EffectivePoints.Num();
     PointCloudPtr->LastUpdateTime = Timestamp;
+    PointCloudPtr->DefaultPointSizeCm = FMath::Clamp(DefaultPointSizeCm, 0.1f, 100.0f);
 
     TotalFramesReceived++;
-    TotalPointsReceived += Points.Num();
+    TotalPointsReceived += EffectivePoints.Num();
     bRendererDirty = true;
 
-    OnPointCloudUpdated.Broadcast(DeviceID, Points.Num());
+    OnPointCloudUpdated.Broadcast(DeviceID, EffectivePoints.Num());
 
     UE_LOG(LogPointCloudManager, Verbose,
         TEXT("Point cloud updated: Device=%d, Source=%s, Points=%d"),
-        DeviceID, SourceLabel, Points.Num());
+        DeviceID, SourceLabel, EffectivePoints.Num());
 }
 
 int32 UPointCloudManager::CleanupStalePointClouds()
@@ -1474,4 +1685,69 @@ FLinearColor UPointCloudManager::MakeColorFromIntensity(float Intensity) const
         FLinearColor(0.0f, 0.4f, 1.0f, 1.0f),
         FLinearColor(1.0f, 0.15f, 0.1f, 1.0f),
         Alpha);
+}
+
+bool UPointCloudManager::BuildLegacyPointCloudPayload(
+    int32 DeviceID,
+    const TArray<FVector>& WorldPointsCm,
+    TArray<uint8>& OutPayload) const
+{
+    if (DeviceID <= 0 || WorldPointsCm.Num() <= 0)
+    {
+        return false;
+    }
+
+    constexpr int32 LegacyPayloadHeaderBytes = sizeof(uint32) + sizeof(uint32);
+    constexpr int32 MaxUdpDatagramBytes = 65507;
+    constexpr int32 MaxCustomUdpPayloadBytes = MaxUdpDatagramBytes - static_cast<int32>(sizeof(FUDPMessageHeader));
+    const int32 MaxPointCountPerPayload = FMath::Max(
+        1,
+        (MaxCustomUdpPayloadBytes - LegacyPayloadHeaderBytes) / static_cast<int32>(sizeof(FPointCloudPoint)));
+
+    const int32 SourcePointCount = WorldPointsCm.Num();
+    const int32 SampleStep = FMath::Max(1, FMath::DivideAndRoundUp(SourcePointCount, MaxPointCountPerPayload));
+    const int32 PointCount = FMath::Min(SourcePointCount, FMath::DivideAndRoundUp(SourcePointCount, SampleStep));
+    const int32 TotalBytes = LegacyPayloadHeaderBytes + PointCount * static_cast<int32>(sizeof(FPointCloudPoint));
+    OutPayload.SetNumUninitialized(TotalBytes);
+
+    if (PointCount < SourcePointCount)
+    {
+        UE_LOG(
+            LogPointCloudManager,
+            Verbose,
+            TEXT("Legacy point cloud payload down-sampled to fit one UDP datagram: Device=%d Source=%d Packed=%d"),
+            DeviceID,
+            SourcePointCount,
+            PointCount);
+    }
+
+    uint8* Cursor = OutPayload.GetData();
+    const uint32 PackedDeviceID = static_cast<uint32>(DeviceID);
+    const uint32 PackedPointCount = static_cast<uint32>(PointCount);
+    FMemory::Memcpy(Cursor, &PackedDeviceID, sizeof(PackedDeviceID));
+    Cursor += sizeof(PackedDeviceID);
+    FMemory::Memcpy(Cursor, &PackedPointCount, sizeof(PackedPointCount));
+    Cursor += sizeof(PackedPointCount);
+
+    // Manager-side legacy transmission keeps compatibility with the original custom UDP protocol:
+    // convert UE world-space centimeters back to NED meters on the wire.
+    // Legacy 0x0004 must fit inside a single custom-UDP datagram, so large lidar frames
+    // are uniformly down-sampled here before packing.
+    int32 PackedPointsWritten = 0;
+    for (int32 SourceIndex = 0;
+         SourceIndex < SourcePointCount && PackedPointsWritten < PointCount;
+         SourceIndex += SampleStep)
+    {
+        const FVector& WorldPointCm = WorldPointsCm[SourceIndex];
+        FPointCloudPoint Point;
+        Point.Position = UCoordinateConverter::UEToNED(WorldPointCm);
+        Point.Intensity = 1.0f;
+        FMemory::Memcpy(Cursor, &Point, sizeof(FPointCloudPoint));
+        Cursor += sizeof(FPointCloudPoint);
+        ++PackedPointsWritten;
+    }
+
+    check(PackedPointsWritten == PointCount);
+
+    return true;
 }

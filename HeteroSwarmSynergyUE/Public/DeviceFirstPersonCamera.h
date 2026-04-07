@@ -1,14 +1,10 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
-// 项目: 室内外异构编队协同演示验证系统
-// 模块: 摄像头系统 - 设备第一人称视角
-// 作者: Carius
-// 日期: 2026-02-26
-
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Camera/CameraComponent.h"
 #include "DeviceFirstPersonCamera.generated.h"
+
+class URTSPStreamComponent;
 
 /**
  * 设备第一人称摄像头组件类型枚举
@@ -41,18 +37,13 @@ enum class EDeviceCameraType : uint8
  * - 可配置的相机位置偏移和旋转
  * - 支持云台效果(平滑旋转)
  * - 可选的画面后处理效果
- * - 支持视频流推送(配合摄像头回传功能)
+ * - 可选与 URTSPStreamComponent 自动绑定，实现“相机即推流视角”
  *
  * 使用方式:
  * 1. 在设备Actor蓝图中添加此组件
- * 2. 在蓝图中选择摄像头类型并调整位置偏移
- * 3. 通过CameraManager切换到该摄像头视角
- * 4. 可选:启用视频流推送功能
- *
- * 集成示例:
- * - 无人机Actor: 添加UAV_Front或UAV_Gimbal类型
- * - 无人车Actor: 添加UGV_Front类型
- * - 机器狗Actor: 添加RobotDog_Head类型
+ * 2. 若需要 RTSP 推流，再在同一个 Actor 上额外添加一个 RtspStreamComponent
+ * 3. 可开启 bAutoAttachRTSPStreamToCamera，让 RtspStreamComponent 自动跟随本相机
+ * 4. 调用 StartVideoStream / StopVideoStream 即可控制推流
  */
 UCLASS(Blueprintable, BlueprintType, ClassGroup = (Camera),
     meta = (BlueprintSpawnableComponent, DisplayName = "Device First Person Camera"))
@@ -61,8 +52,6 @@ UCLASS(Blueprintable, BlueprintType, ClassGroup = (Camera),
     GENERATED_BODY()
 
 public:
-    // ========== 构造与生命周期 ==========
-
     UDeviceFirstPersonCamera();
 
     /** 组件初始化 */
@@ -92,10 +81,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Device Camera|Transform")
     FRotator CameraRotationOffset = FRotator::ZeroRotator;
 
-    ///** 是否使用父Actor的控制旋转 */
-    //UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Device Camera|Transform")
-    //bool bUsePawnControlRotation = false;
-
     // ========== 云台效果配置 ==========
 
     /** 是否启用云台效果(平滑跟随) */
@@ -124,7 +109,7 @@ public:
         meta = (ClampMin = "30.0", ClampMax = "120.0"))
     float CameraFOV = 90.0f;
 
-    /** 近裁剪面距离 */
+    /** 近裁剪面距离(当前仅保留为配置项，若项目后续启用自定义近裁剪可在此接入) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Device Camera|View",
         meta = (ClampMin = "1.0", ClampMax = "100.0"))
     float NearClipPlane = 10.0f;
@@ -150,6 +135,14 @@ public:
         meta = (EditCondition = "bEnableVideoStream", ClampMin = "15", ClampMax = "60"))
     int32 StreamFrameRate = 30;
 
+    /** 指定要绑定的 RtspStreamComponent 名称；为空时自动查找本 Actor 上第一个该类型组件 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Device Camera|Video Stream")
+    FName RTSPStreamComponentName = NAME_None;
+
+    /** 是否在 BeginPlay 时自动把 RtspStreamComponent 挂到本摄像机下 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Device Camera|Video Stream")
+    bool bAutoAttachRTSPStreamToCamera = true;
+
     // ========== 后处理效果 ==========
 
     /** 是否启用自定义后处理 */
@@ -168,75 +161,58 @@ public:
 
     // ========== 蓝图事件 ==========
 
-    /** 摄像头激活时触发 */
     UFUNCTION(BlueprintImplementableEvent, Category = "Device Camera Events",
         meta = (DisplayName = "On Camera Activated"))
     void OnCameraActivated();
 
-    /** 摄像头失活时触发 */
     UFUNCTION(BlueprintImplementableEvent, Category = "Device Camera Events",
         meta = (DisplayName = "On Camera Deactivated"))
     void OnCameraDeactivated();
 
-    /** 视频流开始推送时触发 */
     UFUNCTION(BlueprintImplementableEvent, Category = "Device Camera Events",
         meta = (DisplayName = "On Video Stream Started"))
     void OnVideoStreamStarted();
 
-    /** 视频流停止推送时触发 */
     UFUNCTION(BlueprintImplementableEvent, Category = "Device Camera Events",
         meta = (DisplayName = "On Video Stream Stopped"))
     void OnVideoStreamStopped();
 
     // ========== 蓝图接口 ==========
 
-    /** 应用摄像头类型预设 */
     UFUNCTION(BlueprintCallable, Category = "Device Camera|Control")
     void ApplyCameraTypePreset();
 
-    /** 设置摄像头类型并应用预设 */
     UFUNCTION(BlueprintCallable, Category = "Device Camera|Control")
     void SetCameraType(EDeviceCameraType NewType);
 
-    /** 设置相机偏移 */
     UFUNCTION(BlueprintCallable, Category = "Device Camera|Control")
     void SetCameraOffset(FVector NewOffset);
 
-    /** 设置相机旋转偏移 */
     UFUNCTION(BlueprintCallable, Category = "Device Camera|Control")
     void SetCameraRotationOffset(FRotator NewRotationOffset);
 
-    /** 设置云台Pitch角度(仅当启用云台时有效) */
     UFUNCTION(BlueprintCallable, Category = "Device Camera|Control")
     void SetGimbalPitch(float Pitch);
 
-    /** 获取当前云台Pitch角度 */
     UFUNCTION(BlueprintPure, Category = "Device Camera|Control")
     float GetGimbalPitch() const { return CurrentGimbalPitch; }
 
-    /** 开始视频流推送 */
     UFUNCTION(BlueprintCallable, Category = "Device Camera|Video Stream")
     void StartVideoStream();
 
-    /** 停止视频流推送 */
     UFUNCTION(BlueprintCallable, Category = "Device Camera|Video Stream")
     void StopVideoStream();
 
-    /** 是否正在推送视频流 */
     UFUNCTION(BlueprintPure, Category = "Device Camera|Video Stream")
     bool IsStreamingVideo() const { return bIsStreamingVideo; }
 
-    /** 获取摄像头类型 */
     UFUNCTION(BlueprintPure, Category = "Device Camera|Info")
     EDeviceCameraType GetCameraType() const { return CameraType; }
 
-    /** 获取拥有者设备Actor */
     UFUNCTION(BlueprintPure, Category = "Device Camera|Info")
     AActor* GetOwnerDevice() const;
 
 protected:
-    // ========== 内部状态 ==========
-
     /** 当前云台Pitch角度 */
     float CurrentGimbalPitch;
 
@@ -246,23 +222,18 @@ protected:
     /** 是否正在推送视频流 */
     bool bIsStreamingVideo;
 
-    // ========== 内部函数 ==========
+    /** 缓存的流组件 */
+    UPROPERTY(Transient)
+    URTSPStreamComponent* CachedRTSPStreamComponent;
 
-    /** 更新云台旋转 */
     void UpdateGimbalRotation(float DeltaTime);
-
-    /** 更新相机变换 */
     void UpdateCameraTransform();
-
-    /** 应用后处理设置 */
     void ApplyPostProcessSettings();
 
-    /** 获取类型预设的FOV */
     float GetPresetFOV(EDeviceCameraType Type) const;
-
-    /** 获取类型预设的偏移 */
     FVector GetPresetOffset(EDeviceCameraType Type) const;
-
-    /** 获取类型预设的旋转偏移 */
     FRotator GetPresetRotationOffset(EDeviceCameraType Type) const;
+
+    URTSPStreamComponent* FindRTSPStreamComponent();
+    void SyncRTSPStreamSettings();
 };

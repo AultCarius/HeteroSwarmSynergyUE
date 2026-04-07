@@ -1,6 +1,6 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
-// œÓƒø:  “ƒ⁄Õ‚“Ïππ±‡∂”–≠Õ¨—› æ—È÷§œµÕ≥
-// ƒ£øÈ: ¥´∏–∆˜œµÕ≥ - –Èƒ‚º§π‚¿◊¥Ô
+Ôªø// Copyright Epic Games, Inc. All Rights Reserved.
+// È°πÁõÆ: ÂÆ§ÂÜÖÂ§ñÂºÇÊûÑÁºñÈòüÂçèÂêåÊºîÁ§∫È™åËØÅÁ≥ªÁªü
+// Ê®°Âùó: ‰º†ÊÑüÂô®Á≥ªÁªü - ËôöÊãüÊøÄÂÖâÈõ∑Ëææ
 
 #include "VirtualLidarComponent.h"
 
@@ -9,8 +9,11 @@
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "HAL/PlatformTime.h"
+#include "HeteroSwarmGameInstance.h"
 #include "Interfaces/IPv4/IPv4Address.h"
 #include "IPAddress.h"
+#include "Misc/Crc.h"
+#include "PointCloudManager.h"
 #include "Sockets.h"
 #include "SocketSubsystem.h"
 
@@ -23,7 +26,7 @@ namespace
     constexpr uint8 CompactPointFormatXYZ32FRGBA8 = 1;
     constexpr uint8 CompactFlagReplaceExisting = 1 << 1;
     constexpr uint8 CompactFlagPointsAreWorldSpace = 1 << 3;
-    constexpr int32 CompactHeaderBytes = 56;
+    constexpr int32 CompactHeaderBytes = 60;
 
     template <typename TValue>
     void AppendRawValue(TArray<uint8>& Buffer, const TValue& Value)
@@ -103,15 +106,53 @@ bool UVirtualLidarComponent::StartLidar()
         return false;
     }
 
-    if (!EnsureSendSocket())
+    if (TransportMode == EVirtualLidarTransportMode::CompactChunkedUdp)
     {
-        bIsSending = false;
-        return false;
+        const FString NormalizedHost = RemoteHost.TrimStartAndEnd();
+        const bool bLoopbackHost =
+            NormalizedHost.Equals(TEXT("127.0.0.1"), ESearchCase::IgnoreCase) ||
+            NormalizedHost.Equals(TEXT("localhost"), ESearchCase::IgnoreCase);
+
+        // Avoid feeding the compact receiver from an in-project sender by default.
+        // Validation should show the externally injected test cloud, not an engine self-loop.
+        if (bLoopbackHost && RemotePort == 15000)
+        {
+            UpdateStatus(TEXT("Compact loopback sender is disabled for port 15000; use an external test script instead"));
+            bIsSending = false;
+            UE_LOG(LogVirtualLidar, Warning,
+                TEXT("Blocked compact self-loop point cloud sender to %s:%d"),
+                *RemoteHost,
+                RemotePort);
+            return false;
+        }
+
+        if (!EnsureSendSocket())
+        {
+            bIsSending = false;
+            return false;
+        }
+    }
+    else
+    {
+        CloseSendSocket();
+
+        if (ResolvePointCloudManager() == nullptr)
+        {
+            UpdateStatus(TEXT("PointCloudManager is unavailable for legacy point cloud sending"));
+            bIsSending = false;
+            return false;
+        }
     }
 
     bIsSending = true;
     LastScanTimeSeconds = FPlatformTime::Seconds();
-    UpdateStatus(FString::Printf(TEXT("Sending to %s:%d"), *RemoteHost, RemotePort));
+    UpdateStatus(FString::Printf(
+        TEXT("Sending via %s to %s:%d"),
+        TransportMode == EVirtualLidarTransportMode::LegacyCustomUdp
+            ? TEXT("PointCloudManager/UDPManager")
+            : TEXT("compact UDP"),
+        *RemoteHost,
+        RemotePort));
 
     return true;
 }
@@ -125,12 +166,6 @@ void UVirtualLidarComponent::StopLidar()
 
 bool UVirtualLidarComponent::CaptureAndSendOnce()
 {
-    if (!EnsureSendSocket())
-    {
-        bIsSending = false;
-        return false;
-    }
-
     TArray<FVector> HitPointsWorldMeters;
     if (!PerformScan(HitPointsWorldMeters))
     {
@@ -140,31 +175,24 @@ bool UVirtualLidarComponent::CaptureAndSendOnce()
     }
 
     const uint32 FrameSequence = SequenceCounter + 1;
-    TArray<TArray<uint8>> Packets;
-    if (!BuildCompactPointCloudPackets(HitPointsWorldMeters, FrameSequence, Packets))
+    int32 ChunkCount = 0;
+    if (!SendPointCloudFrame(HitPointsWorldMeters, FrameSequence, ChunkCount))
     {
         LastPointCount = 0;
-        UpdateStatus(TEXT("Failed to build point cloud packets"));
+        UpdateStatus(TEXT("Failed to send point cloud frame"));
         return false;
-    }
-
-    for (const TArray<uint8>& PacketBytes : Packets)
-    {
-        if (!SendPacket(PacketBytes))
-        {
-            LastPointCount = 0;
-            bIsSending = false;
-            return false;
-        }
     }
 
     SequenceCounter = FrameSequence;
     LastPointCount = HitPointsWorldMeters.Num();
     ++TotalFramesSent;
-    UpdateStatus(FString::Printf(TEXT("Sent frame %lld with %d points in %d packet(s) to %s:%d"),
+    UpdateStatus(FString::Printf(TEXT("Sent frame %lld with %d points via %s in %d message(s) to %s:%d"),
         TotalFramesSent,
         LastPointCount,
-        Packets.Num(),
+        TransportMode == EVirtualLidarTransportMode::LegacyCustomUdp
+            ? TEXT("legacy/0x0004")
+            : TEXT("compact"),
+        ChunkCount,
         *RemoteHost,
         RemotePort));
 
@@ -247,8 +275,8 @@ bool UVirtualLidarComponent::PerformScan(TArray<FVector>& OutHitPointsWorldMeter
         return false;
     }
 
-    const int32 HorizontalCount = FMath::Clamp(HorizontalSampleCount, 1, 256);
-    const int32 VerticalCount = FMath::Clamp(VerticalSampleCount, 1, 64);
+    const int32 HorizontalCount = FMath::Clamp(HorizontalSampleCount, 1, 2048);
+    const int32 VerticalCount = FMath::Clamp(VerticalSampleCount, 1, 128);
     const int32 MaxSamples = FMath::Max(1, MaxPointsPerFrame);
 
     const float HorizontalFov = FMath::Clamp(HorizontalFovDegrees, 1.0f, 360.0f);
@@ -256,7 +284,7 @@ bool UVirtualLidarComponent::PerformScan(TArray<FVector>& OutHitPointsWorldMeter
     const float MinRangeCm = FMath::Max(1.0f, MinRangeMeters * 100.0f);
     const float MaxRangeCm = FMath::Max(MinRangeCm + 1.0f, MaxRangeMeters * 100.0f);
 
-    const FVector TraceStart = GetComponentLocation();
+    const FVector TraceStart = GetComponentTransform().TransformPosition(ScanOriginOffsetCm);
     const bool bWrapHorizontally = HorizontalCount > 1 && HorizontalFov >= 359.9f;
     const float HorizontalStep =
         (HorizontalCount <= 1) ? 0.0f : HorizontalFov / static_cast<float>(bWrapHorizontally ? HorizontalCount : (HorizontalCount - 1));
@@ -274,6 +302,36 @@ bool UVirtualLidarComponent::PerformScan(TArray<FVector>& OutHitPointsWorldMeter
         QueryParams.AddIgnoredActor(GetOwner());
     }
 
+    auto DrawImpactDebugPoints = [&]()
+    {
+        if (!bDrawDebugImpactPoints || OutHitPointsWorldMeters.Num() <= 0)
+        {
+            return;
+        }
+
+        const int32 SafeMaxDebugImpactPoints = FMath::Clamp(MaxDebugImpactPoints, 1, 20000);
+        const int32 DrawStep = FMath::Max(
+            1,
+            FMath::CeilToInt(static_cast<float>(OutHitPointsWorldMeters.Num()) / static_cast<float>(SafeMaxDebugImpactPoints)));
+        const FColor DebugImpactColor = DebugImpactPointColor.ToFColor(true);
+        const float DebugPointSize = FMath::Clamp(DebugImpactPointSizeCm, 1.0f, 30.0f);
+        const float DebugDuration = FMath::Clamp(DebugImpactDrawDuration, 0.0f, 2.0f);
+
+        for (int32 PointIndex = 0; PointIndex < OutHitPointsWorldMeters.Num(); PointIndex += DrawStep)
+        {
+            DrawDebugPoint(
+                World,
+                OutHitPointsWorldMeters[PointIndex] * 100.0f,
+                DebugPointSize,
+                DebugImpactColor,
+                false,
+                DebugDuration,
+                0);
+        }
+    };
+
+    // The scan runs against real scene geometry through line traces.
+    // We keep the transport payload in meters to match the custom UDP protocol.
     OutHitPointsWorldMeters.Reserve(FMath::Min(HorizontalCount * VerticalCount, MaxSamples));
 
     for (int32 VerticalIndex = 0; VerticalIndex < VerticalCount; ++VerticalIndex)
@@ -284,6 +342,7 @@ bool UVirtualLidarComponent::PerformScan(TArray<FVector>& OutHitPointsWorldMeter
         {
             if (OutHitPointsWorldMeters.Num() >= MaxSamples)
             {
+                DrawImpactDebugPoints();
                 return OutHitPointsWorldMeters.Num() > 0;
             }
 
@@ -315,7 +374,82 @@ bool UVirtualLidarComponent::PerformScan(TArray<FVector>& OutHitPointsWorldMeter
         }
     }
 
+    DrawImpactDebugPoints();
     return OutHitPointsWorldMeters.Num() > 0;
+}
+
+bool UVirtualLidarComponent::SendPointCloudFrame(
+    const TArray<FVector>& WorldPointsMeters,
+    uint32 FrameSequence,
+    int32& OutChunkCount)
+{
+    OutChunkCount = 0;
+
+    if (TransportMode == EVirtualLidarTransportMode::LegacyCustomUdp)
+    {
+        const bool bSent = SendLegacyPointCloudFrame(WorldPointsMeters);
+        OutChunkCount = bSent ? 1 : 0;
+        return bSent;
+    }
+
+    if (!EnsureSendSocket())
+    {
+        bIsSending = false;
+        return false;
+    }
+
+    TArray<TArray<uint8>> Packets;
+    if (!BuildCompactPointCloudPackets(WorldPointsMeters, FrameSequence, Packets))
+    {
+        return false;
+    }
+
+    for (const TArray<uint8>& PacketBytes : Packets)
+    {
+        if (!SendPacket(PacketBytes))
+        {
+            bIsSending = false;
+            return false;
+        }
+    }
+
+    OutChunkCount = Packets.Num();
+    return true;
+}
+
+bool UVirtualLidarComponent::SendLegacyPointCloudFrame(const TArray<FVector>& WorldPointsMeters)
+{
+    UPointCloudManager* PointCloudManager = ResolvePointCloudManager();
+    if (PointCloudManager == nullptr)
+    {
+        UpdateStatus(TEXT("PointCloudManager is unavailable for legacy point cloud sending"));
+        return false;
+    }
+
+    TArray<FVector> WorldPointsCm;
+    WorldPointsCm.Reserve(WorldPointsMeters.Num());
+    for (const FVector& WorldPointMeters : WorldPointsMeters)
+    {
+        WorldPointsCm.Add(WorldPointMeters * 100.0f);
+    }
+
+    // The formal project path is:
+    // VirtualLidarComponent -> PointCloudManager -> UDPManager -> MessageType=0x0004.
+    const bool bSent = PointCloudManager->SendLegacyPointCloudFrame(
+        static_cast<int32>(ResolveDeviceID()),
+        WorldPointsCm,
+        RemotePort,
+        RemoteHost);
+
+    if (!bSent)
+    {
+        UpdateStatus(FString::Printf(
+            TEXT("Failed to send legacy point cloud frame via manager to %s:%d"),
+            *RemoteHost,
+            RemotePort));
+    }
+
+    return bSent;
 }
 
 bool UVirtualLidarComponent::BuildCompactPointCloudPackets(
@@ -334,6 +468,7 @@ bool UVirtualLidarComponent::BuildCompactPointCloudPackets(
     FTCHARToUTF8 FrameNameUtf8(*SafeFrameName);
     const uint16 FrameNameByteCount = static_cast<uint16>(FMath::Min(FrameNameUtf8.Length(), 65535));
     const uint32 PointCount = static_cast<uint32>(WorldPointsMeters.Num());
+    const uint32 ResolvedDeviceID = ResolveDeviceID();
     const int32 PointStride = 16;
     const int32 SafeMaxPayloadBytes = FMath::Clamp(MaxPacketPayloadBytes, 256, 60000);
     const int32 MaxPointsPerPacket = FMath::Max(1, SafeMaxPayloadBytes / PointStride);
@@ -371,6 +506,7 @@ bool UVirtualLidarComponent::BuildCompactPointCloudPackets(
         AppendRawValue<uint8>(Packet, 0);
         AppendRawValue<uint16>(Packet, FrameNameByteCount);
         AppendRawValue<uint32>(Packet, FrameSequence);
+        AppendRawValue<uint32>(Packet, ResolvedDeviceID);
         AppendRawValue<uint32>(Packet, PointCount);
         AppendRawValue<uint32>(Packet, PayloadBytes);
         AppendRawValue<float>(Packet, DefaultPointSizeCm);
@@ -400,6 +536,35 @@ bool UVirtualLidarComponent::BuildCompactPointCloudPackets(
     }
 
     return OutPackets.Num() > 0;
+}
+
+uint32 UVirtualLidarComponent::ResolveDeviceID() const
+{
+    if (DeviceID > 0)
+    {
+        return static_cast<uint32>(DeviceID);
+    }
+
+    const FString StablePath = GetPathNameSafe(this);
+    const uint32 Hash = FCrc::StrCrc32(*StablePath);
+    return Hash == 0 ? 1u : Hash;
+}
+
+UPointCloudManager* UVirtualLidarComponent::ResolvePointCloudManager() const
+{
+    UWorld* World = GetWorld();
+    if (World == nullptr)
+    {
+        return nullptr;
+    }
+
+    UHeteroSwarmGameInstance* GameInstance = Cast<UHeteroSwarmGameInstance>(World->GetGameInstance());
+    if (GameInstance == nullptr)
+    {
+        return nullptr;
+    }
+
+    return GameInstance->GetPointCloudManager();
 }
 
 bool UVirtualLidarComponent::SendPacket(const TArray<uint8>& PacketBytes)

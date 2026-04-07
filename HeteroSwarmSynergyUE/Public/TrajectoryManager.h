@@ -117,6 +117,61 @@ struct FTrajectoryConfig
         meta = (ClampMin = "10.0", ClampMax = "500.0"))
     float DirectionArrowSizeCm = 90.0f;
 
+    /** 轨迹方向箭头间距（厘米） */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Debug",
+        meta = (ClampMin = "10.0", ClampMax = "5000.0"))
+    float DirectionArrowSpacingCm = 280.0f;
+
+    /** 是否在轨迹末端绘制更醒目的方向头 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Debug")
+    bool bDrawTerminalDirectionHead = true;
+
+    /** 轨迹末端方向头大小（厘米） */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Debug",
+        meta = (ClampMin = "20.0", ClampMax = "800.0"))
+    float TerminalDirectionHeadSizeCm = 180.0f;
+
+    /** 是否显示原始轨迹点标记 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Debug")
+    bool bDrawPointMarkers = false;
+
+    /** 是否对折线做平滑重采样 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Render")
+    bool bSmoothCurve = true;
+
+    /** 每段平滑插值的细分数 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Render",
+        meta = (ClampMin = "1", ClampMax = "32"))
+    int32 SmoothSubstepsPerSegment = 8;
+
+    /** 是否启用头细尾粗或头粗尾细的宽度渐变 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Render")
+    bool bUseWidthTaper = true;
+
+    /** 轨迹最老端宽度倍率 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Render",
+        meta = (ClampMin = "0.05", ClampMax = "4.0"))
+    float OldestWidthScale = 0.45f;
+
+    /** 轨迹最新端宽度倍率 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Render",
+        meta = (ClampMin = "0.05", ClampMax = "4.0"))
+    float NewestWidthScale = 1.0f;
+
+    /** 是否启用轨迹头尾亮度/透明度渐变 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Render")
+    bool bUseOpacityTaper = true;
+
+    /** 轨迹最老端亮度倍率 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Render",
+        meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float OldestOpacityScale = 0.22f;
+
+    /** 轨迹最新端亮度倍率 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Render",
+        meta = (ClampMin = "0.0", ClampMax = "2.0"))
+    float NewestOpacityScale = 1.0f;
+
     /** 是否根据设备状态自动沉淀实际轨迹 */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory Config|Actual Tracking")
     bool bAutoTrackActualTrajectory = true;
@@ -574,6 +629,11 @@ private:
     bool EnsureTrajectoryEntry(int32 DeviceID, ETrajectoryType TrajectoryType, FDeviceTrajectory*& OutTrajectoryPtr);
     bool AppendPointToTrajectory(FDeviceTrajectory& Trajectory, const FVector& UELocation, float Timestamp);
     bool ShouldAppendActualPoint(const FDeviceTrajectory& Trajectory, const FVector& UELocation, float Timestamp) const;
+    void BuildSmoothedTrajectorySamples(
+        const FDeviceTrajectory& Trajectory,
+        const FVector& TrajectoryOffset,
+        TArray<FVector>& OutPositions,
+        TArray<float>& OutTimestamps) const;
 
     /** 在场景中绘制轨迹调试可视化 */
     void DrawDebugTrajectories() const;

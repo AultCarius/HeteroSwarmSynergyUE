@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 // 项目: 室内外异构编队协同演示验证系统
 // 模块: 传感器系统 - 虚拟激光雷达测试Actor
 
@@ -64,6 +64,11 @@ private:
     float PathDirectionArrowSizeCm;
     float PathSensorMarkerRadiusCm;
     float PathLabelHeightCm;
+    bool bDrawSensorLabel;
+    bool bDrawSensorForwardArrow;
+    float PathSensorLabelHeightCm;
+    float PathSensorForwardArrowLengthCm;
+    FString PathSensorLabelText;
     FLinearColor PathLineColor;
     FLinearColor PathActiveWaypointColor;
     FLinearColor PathLabelColor;

@@ -107,6 +107,7 @@ protected:
     TArray<USplineMeshComponent*> ActualSplineMeshes;
 
     float TimeSinceLastRefresh;
+    bool bSuppressedMissingSegmentMeshLog;
 
 protected:
     void RefreshTrajectoryInternal(

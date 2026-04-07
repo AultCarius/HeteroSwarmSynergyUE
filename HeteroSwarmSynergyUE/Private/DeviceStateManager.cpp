@@ -1,6 +1,3 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
-// 修改：2026-03-13  v2.0 — MAVLink适配，扩展设备状态（四元数/GPS/电量/执行器）
-
 #include "DeviceStateManager.h"
 #include "ProtocolMappingLibrary.h"
 #include "UDPManager.h"
@@ -539,6 +536,25 @@ int32 UDeviceStateManager::GetOnlineDeviceCount() const
         }
     }
     return Count;
+}
+
+bool UDeviceStateManager::SetDeviceOnlineState(int32 DeviceID, bool bOnline)
+{
+    FDeviceRuntimeState* StatePtr = DeviceCache.Find(DeviceID);
+    if (!StatePtr)
+    {
+        return false;
+    }
+
+    StatePtr->bIsOnline = bOnline;
+    StatePtr->LastUpdateTime = FPlatformTime::Seconds();
+
+    UE_LOG(LogDeviceStateManager, Verbose,
+        TEXT("Device %d online state set to: %s"),
+        DeviceID,
+        bOnline ? TEXT("ONLINE") : TEXT("OFFLINE"));
+
+    return true;
 }
 
 void UDeviceStateManager::GetStatistics(FDeviceStatistics& OutStatistics) const

@@ -121,6 +121,5 @@ void AHeteroSwarmAgentBase::UpdateTransformFromRuntimeState(float DeltaSeconds)
 
 void AHeteroSwarmAgentBase::UpdateActuatorVisuals(float DeltaSeconds)
 {
-    // 第2步先预留空实现。
-    // 后续由四旋翼/机器狗等子类覆盖，读取 CurrentRuntimeState.ActuatorStates 进行可视化驱动。
+    BP_UpdateActuatorVisuals(CurrentRuntimeState, DeltaSeconds);
 }

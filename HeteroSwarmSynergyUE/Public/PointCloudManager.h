@@ -22,6 +22,7 @@ struct FPointCloudRuntimePoint
 {
     GENERATED_BODY()
 
+    // Runtime location is always stored in UE world space, in centimeters.
     UPROPERTY(BlueprintReadOnly, Category = "Point Cloud")
     FVector Location = FVector::ZeroVector;
 
@@ -51,6 +52,9 @@ struct FDevicePointCloud
 
     UPROPERTY(BlueprintReadOnly, Category = "Point Cloud")
     float LastUpdateTime = 0.0f;
+
+    UPROPERTY(BlueprintReadOnly, Category = "Point Cloud")
+    float DefaultPointSizeCm = 5.0f;
 };
 
 USTRUCT(BlueprintType)
@@ -104,11 +108,15 @@ struct FPointCloudManagerConfig
     float CompactFragmentTimeoutSeconds = 2.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Point Cloud Config")
-    bool bEnableRendererActor = true;
+    bool bEnableRendererActor = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Point Cloud Config",
         meta = (ClampMin = "0.1", ClampMax = "100.0", EditCondition = "bEnableRendererActor"))
     float RendererPointSizeCm = 18.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Point Cloud Config",
+        meta = (EditCondition = "bEnableRendererActor"))
+    bool bPreferPacketPointSize = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Point Cloud Config",
         meta = (ClampMin = "0.001", ClampMax = "100.0", EditCondition = "bEnableRendererActor"))
@@ -126,16 +134,23 @@ struct FPointCloudManagerConfig
     bool bEnableDebugDraw = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Point Cloud Config",
-        meta = (ClampMin = "1", ClampMax = "10000", EditCondition = "bEnableDebugDraw"))
-    int32 MaxDebugDrawPointsPerCloud = 3000;
+        meta = (ClampMin = "1", ClampMax = "50000", EditCondition = "bEnableDebugDraw"))
+    int32 MaxDebugDrawPointsPerCloud = 20000;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Point Cloud Config",
         meta = (ClampMin = "1.0", ClampMax = "30.0", EditCondition = "bEnableDebugDraw"))
-    float DebugDrawPointSize = 14.0f;
+    float DebugDrawPointSize = 8.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Point Cloud Config",
         meta = (ClampMin = "0.0", ClampMax = "60.0"))
-    float CloudStaleTimeoutSeconds = 3.0f;
+    float CloudStaleTimeoutSeconds = 5.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Point Cloud Config|Debug")
+    bool bAnchorCompactPreviewToActiveCamera = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Point Cloud Config|Debug",
+        meta = (ClampMin = "50.0", ClampMax = "5000.0", EditCondition = "bAnchorCompactPreviewToActiveCamera"))
+    float CompactPreviewAnchorDistanceCm = 250.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Point Cloud Config|Debug")
     bool bDrawDebugBounds = true;
@@ -218,6 +233,15 @@ public:
         meta = (DisplayName = "Print Statistics"))
     void PrintStatistics() const;
 
+    // Manager-side send entry for the legacy custom-UDP point cloud format.
+    // This is kept as an integration bridge so point cloud sending can gradually
+    // move back into the manager architecture instead of living only in the lidar component.
+    bool SendLegacyPointCloudFrame(
+        int32 DeviceID,
+        const TArray<FVector>& WorldPointsCm,
+        int32 TargetPort,
+        const FString& TargetIP = TEXT("127.0.0.1")) const;
+
     UPROPERTY(BlueprintAssignable, Category = "UDP|Point Cloud Manager")
     FOnPointCloudUpdated OnPointCloudUpdated;
 
@@ -239,6 +263,7 @@ private:
         uint8 FragmentCount = 0;
         uint16 FrameNameByteCount = 0;
         uint32 Sequence = 0;
+        uint32 DeviceID = 0;
         uint32 PointCount = 0;
         uint32 PayloadBytes = 0;
         float DefaultPointSizeCm = 5.0f;
@@ -290,12 +315,12 @@ private:
     void StopCompactUdpReceiver();
     void HandleCompactUdpDataReceived(const FArrayReaderPtr& Data, const FIPv4Endpoint& Endpoint);
     bool TryParseCompactChunkedDatagram(const TArray<uint8>& Bytes, FCompactChunkHeader& OutHeader, FString& OutFrameName, const uint8*& OutPayloadData, int32& OutPayloadSize) const;
-    bool DecodeCompactChunkedDatagram(const TArray<uint8>& Bytes, int32& OutDeviceID, TArray<FPointCloudRuntimePoint>& OutPoints) const;
+    bool DecodeCompactChunkedDatagram(const TArray<uint8>& Bytes, int32& OutDeviceID, TArray<FPointCloudRuntimePoint>& OutPoints, float& OutDefaultPointSizeCm) const;
     bool AccumulateCompactFragment(const FPendingCompactDatagram& Datagram, TArray<uint8>& OutCompletedDatagram);
     bool BuildCompactDatagram(const FCompactChunkHeader& Header, const FString& FrameName, const TArray<TArray<uint8>>& FragmentPayloads, TArray<uint8>& OutBytes) const;
-    FString MakeCompactAssemblyKey(const FString& EndpointKey, uint32 Sequence) const;
+    FString MakeCompactAssemblyKey(const FString& EndpointKey, uint32 DeviceID, uint32 Sequence) const;
     void PruneExpiredCompactFragments();
-    void ApplyPointCloudFrame(int32 DeviceID, const TArray<FPointCloudRuntimePoint>& Points, float Timestamp, const TCHAR* SourceLabel);
+    void ApplyPointCloudFrame(int32 DeviceID, const TArray<FPointCloudRuntimePoint>& Points, float Timestamp, float DefaultPointSizeCm, const TCHAR* SourceLabel);
     bool ValidatePointCloudHeader(int32 DeviceID, int32 PointCount) const;
     void EnsureRenderActor();
     void CleanupRenderActor();
@@ -304,4 +329,5 @@ private:
     void DrawDebugPointClouds() const;
     FBox ComputePointCloudBounds(const TArray<FPointCloudRuntimePoint>& Points) const;
     FLinearColor MakeColorFromIntensity(float Intensity) const;
+    bool BuildLegacyPointCloudPayload(int32 DeviceID, const TArray<FVector>& WorldPointsCm, TArray<uint8>& OutPayload) const;
 };

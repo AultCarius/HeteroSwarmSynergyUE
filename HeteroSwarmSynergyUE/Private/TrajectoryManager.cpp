@@ -17,6 +17,29 @@ DEFINE_LOG_CATEGORY_STATIC(LogTrajectoryManager, Log, All);
 
 namespace
 {
+    float SmoothStep01(const float Value)
+    {
+        const float Clamped = FMath::Clamp(Value, 0.0f, 1.0f);
+        return Clamped * Clamped * (3.0f - 2.0f * Clamped);
+    }
+
+    FVector CatmullRomSample(
+        const FVector& P0,
+        const FVector& P1,
+        const FVector& P2,
+        const FVector& P3,
+        const float T)
+    {
+        const float T2 = T * T;
+        const float T3 = T2 * T;
+
+        return 0.5f * (
+            (2.0f * P1) +
+            (-P0 + P2) * T +
+            (2.0f * P0 - 5.0f * P1 + 4.0f * P2 - P3) * T2 +
+            (-P0 + 3.0f * P1 - 3.0f * P2 + P3) * T3);
+    }
+
     FString BuildDefaultTrajectoryDisplayJson()
     {
         return FString(
@@ -27,17 +50,29 @@ namespace
             TEXT("    \"planned_color_rgba\": [0.0, 1.0, 0.0, 1.0],\n")
             TEXT("    \"actual_color_rgba\": [1.0, 0.45, 0.08, 1.0],\n")
             TEXT("    \"lifetime_seconds\": 20.0,\n")
-            TEXT("    \"line_width\": 6.0,\n")
+            TEXT("    \"line_width\": 2.5,\n")
             TEXT("    \"opacity\": 0.95,\n")
             TEXT("    \"enable_fade_out\": true,\n")
             TEXT("    \"max_points_per_trajectory\": 600,\n")
             TEXT("    \"enable_debug_visualization\": true,\n")
             TEXT("    \"draw_device_label\": true,\n")
             TEXT("    \"draw_direction_arrows\": true,\n")
+            TEXT("    \"direction_arrow_spacing_cm\": 420.0,\n")
+            TEXT("    \"draw_terminal_direction_head\": true,\n")
+            TEXT("    \"terminal_direction_head_size_cm\": 80.0,\n")
+            TEXT("    \"draw_point_markers\": false,\n")
             TEXT("    \"debug_point_size\": 18.0,\n")
-            TEXT("    \"planned_vertical_offset_cm\": 40.0,\n")
+            TEXT("    \"planned_vertical_offset_cm\": 12.0,\n")
             TEXT("    \"actual_vertical_offset_cm\": 0.0,\n")
-            TEXT("    \"direction_arrow_size_cm\": 90.0\n")
+            TEXT("    \"direction_arrow_size_cm\": 40.0,\n")
+            TEXT("    \"smooth_curve\": true,\n")
+            TEXT("    \"smooth_substeps_per_segment\": 8,\n")
+            TEXT("    \"use_width_taper\": true,\n")
+            TEXT("    \"oldest_width_scale\": 0.45,\n")
+            TEXT("    \"newest_width_scale\": 1.0,\n")
+            TEXT("    \"use_opacity_taper\": true,\n")
+            TEXT("    \"oldest_opacity_scale\": 0.22,\n")
+            TEXT("    \"newest_opacity_scale\": 1.0\n")
             TEXT("  },\n")
             TEXT("  \"actual_tracking\": {\n")
             TEXT("    \"enabled\": true,\n")
@@ -147,6 +182,18 @@ UTrajectoryManager::UTrajectoryManager()
     Config.ActualDebugVerticalOffsetCm = 0.0f;
     Config.bDrawDirectionArrows = true;
     Config.DirectionArrowSizeCm = 90.0f;
+    Config.DirectionArrowSpacingCm = 280.0f;
+    Config.bDrawTerminalDirectionHead = true;
+    Config.TerminalDirectionHeadSizeCm = 180.0f;
+    Config.bDrawPointMarkers = false;
+    Config.bSmoothCurve = true;
+    Config.SmoothSubstepsPerSegment = 8;
+    Config.bUseWidthTaper = true;
+    Config.OldestWidthScale = 0.45f;
+    Config.NewestWidthScale = 1.0f;
+    Config.bUseOpacityTaper = true;
+    Config.OldestOpacityScale = 0.22f;
+    Config.NewestOpacityScale = 1.0f;
     Config.bAutoTrackActualTrajectory = true;
     Config.ActualTrackMinDistanceCm = 80.0f;
     Config.ActualTrackMinIntervalSeconds = 0.15f;
@@ -490,6 +537,14 @@ void UTrajectoryManager::ProcessTrajectoryData(const uint8* Data, uint32 Length)
     const float CurrentTime = FPlatformTime::Seconds();
     int32 AddedCount = 0;
 
+    // Planned trajectories represent the latest full plan and must replace the old one.
+    // Actual trajectories keep accumulating from runtime state updates elsewhere.
+    if (TrajectoryType == ETrajectoryType::Planned)
+    {
+        TrajectoryPtr->Points.Reset();
+        TrajectoryPtr->Points.Reserve(FMath::Min(PointCount, Config.MaxPointsPerTrajectory));
+    }
+
     for (int32 i = 0; i < PointCount; ++i)
     {
         // NED → UE坐标转换
@@ -665,6 +720,66 @@ bool UTrajectoryManager::ShouldAppendActualPoint(
         && DeltaSeconds >= Config.ActualTrackMinIntervalSeconds;
 }
 
+void UTrajectoryManager::BuildSmoothedTrajectorySamples(
+    const FDeviceTrajectory& Trajectory,
+    const FVector& TrajectoryOffset,
+    TArray<FVector>& OutPositions,
+    TArray<float>& OutTimestamps) const
+{
+    OutPositions.Reset();
+    OutTimestamps.Reset();
+
+    if (Trajectory.Points.Num() <= 0)
+    {
+        return;
+    }
+
+    if (!Config.bSmoothCurve || Trajectory.Points.Num() < 3)
+    {
+        OutPositions.Reserve(Trajectory.Points.Num());
+        OutTimestamps.Reserve(Trajectory.Points.Num());
+
+        for (const FTrajectoryPoint& Point : Trajectory.Points)
+        {
+            OutPositions.Add(Point.Location + TrajectoryOffset);
+            OutTimestamps.Add(Point.Timestamp);
+        }
+        return;
+    }
+
+    const int32 Substeps = FMath::Max(1, Config.SmoothSubstepsPerSegment);
+    OutPositions.Reserve((Trajectory.Points.Num() - 1) * Substeps + 1);
+    OutTimestamps.Reserve((Trajectory.Points.Num() - 1) * Substeps + 1);
+
+    for (int32 SegmentIndex = 0; SegmentIndex < Trajectory.Points.Num() - 1; ++SegmentIndex)
+    {
+        const int32 PrevIndex = FMath::Max(0, SegmentIndex - 1);
+        const int32 StartIndex = SegmentIndex;
+        const int32 EndIndex = SegmentIndex + 1;
+        const int32 NextIndex = FMath::Min(Trajectory.Points.Num() - 1, SegmentIndex + 2);
+
+        const FVector P0 = Trajectory.Points[PrevIndex].Location + TrajectoryOffset;
+        const FVector P1 = Trajectory.Points[StartIndex].Location + TrajectoryOffset;
+        const FVector P2 = Trajectory.Points[EndIndex].Location + TrajectoryOffset;
+        const FVector P3 = Trajectory.Points[NextIndex].Location + TrajectoryOffset;
+        const float StartTime = Trajectory.Points[StartIndex].Timestamp;
+        const float EndTime = Trajectory.Points[EndIndex].Timestamp;
+
+        if (SegmentIndex == 0)
+        {
+            OutPositions.Add(P1);
+            OutTimestamps.Add(StartTime);
+        }
+
+        for (int32 StepIndex = 1; StepIndex <= Substeps; ++StepIndex)
+        {
+            const float T = static_cast<float>(StepIndex) / static_cast<float>(Substeps);
+            OutPositions.Add(CatmullRomSample(P0, P1, P2, P3, T));
+            OutTimestamps.Add(FMath::Lerp(StartTime, EndTime, T));
+        }
+    }
+}
+
 // ========== 蓝图接口实现 - 查询 ==========
 
 bool UTrajectoryManager::GetDeviceTrajectory(int32 DeviceID, ETrajectoryType TrajectoryType, FDeviceTrajectory& OutTrajectory) const
@@ -769,6 +884,13 @@ void UTrajectoryManager::SetTrajectoryConfig(const FTrajectoryConfig& NewConfig)
     Config.DebugVerticalOffsetCm = FMath::Clamp(Config.DebugVerticalOffsetCm, 0.0f, 500.0f);
     Config.ActualDebugVerticalOffsetCm = FMath::Clamp(Config.ActualDebugVerticalOffsetCm, 0.0f, 500.0f);
     Config.DirectionArrowSizeCm = FMath::Clamp(Config.DirectionArrowSizeCm, 10.0f, 500.0f);
+    Config.DirectionArrowSpacingCm = FMath::Clamp(Config.DirectionArrowSpacingCm, 10.0f, 5000.0f);
+    Config.TerminalDirectionHeadSizeCm = FMath::Clamp(Config.TerminalDirectionHeadSizeCm, 20.0f, 800.0f);
+    Config.SmoothSubstepsPerSegment = FMath::Clamp(Config.SmoothSubstepsPerSegment, 1, 32);
+    Config.OldestWidthScale = FMath::Clamp(Config.OldestWidthScale, 0.05f, 4.0f);
+    Config.NewestWidthScale = FMath::Clamp(Config.NewestWidthScale, 0.05f, 4.0f);
+    Config.OldestOpacityScale = FMath::Clamp(Config.OldestOpacityScale, 0.0f, 1.0f);
+    Config.NewestOpacityScale = FMath::Clamp(Config.NewestOpacityScale, 0.0f, 2.0f);
     Config.ActualTrackMinDistanceCm = FMath::Clamp(Config.ActualTrackMinDistanceCm, 1.0f, 5000.0f);
     Config.ActualTrackMinIntervalSeconds = FMath::Clamp(Config.ActualTrackMinIntervalSeconds, 0.01f, 5.0f);
 
@@ -879,6 +1001,22 @@ bool UTrajectoryManager::LoadConfigFromFile(const FString& ConfigFilePath)
     {
         LoadedConfig.bDrawDirectionArrows = BoolValue;
     }
+    if (TryGetNumberField(DisplayObject, TEXT("direction_arrow_spacing_cm"), NumberValue))
+    {
+        LoadedConfig.DirectionArrowSpacingCm = static_cast<float>(NumberValue);
+    }
+    if (TryGetBoolField(DisplayObject, TEXT("draw_terminal_direction_head"), BoolValue))
+    {
+        LoadedConfig.bDrawTerminalDirectionHead = BoolValue;
+    }
+    if (TryGetNumberField(DisplayObject, TEXT("terminal_direction_head_size_cm"), NumberValue))
+    {
+        LoadedConfig.TerminalDirectionHeadSizeCm = static_cast<float>(NumberValue);
+    }
+    if (TryGetBoolField(DisplayObject, TEXT("draw_point_markers"), BoolValue))
+    {
+        LoadedConfig.bDrawPointMarkers = BoolValue;
+    }
     if (TryGetNumberField(DisplayObject, TEXT("debug_point_size"), NumberValue))
     {
         LoadedConfig.DebugPointSize = static_cast<float>(NumberValue);
@@ -895,6 +1033,38 @@ bool UTrajectoryManager::LoadConfigFromFile(const FString& ConfigFilePath)
     if (TryGetNumberField(DisplayObject, TEXT("direction_arrow_size_cm"), NumberValue))
     {
         LoadedConfig.DirectionArrowSizeCm = static_cast<float>(NumberValue);
+    }
+    if (TryGetBoolField(DisplayObject, TEXT("smooth_curve"), BoolValue))
+    {
+        LoadedConfig.bSmoothCurve = BoolValue;
+    }
+    if (TryGetNumberField(DisplayObject, TEXT("smooth_substeps_per_segment"), NumberValue))
+    {
+        LoadedConfig.SmoothSubstepsPerSegment = FMath::RoundToInt(NumberValue);
+    }
+    if (TryGetBoolField(DisplayObject, TEXT("use_width_taper"), BoolValue))
+    {
+        LoadedConfig.bUseWidthTaper = BoolValue;
+    }
+    if (TryGetNumberField(DisplayObject, TEXT("oldest_width_scale"), NumberValue))
+    {
+        LoadedConfig.OldestWidthScale = static_cast<float>(NumberValue);
+    }
+    if (TryGetNumberField(DisplayObject, TEXT("newest_width_scale"), NumberValue))
+    {
+        LoadedConfig.NewestWidthScale = static_cast<float>(NumberValue);
+    }
+    if (TryGetBoolField(DisplayObject, TEXT("use_opacity_taper"), BoolValue))
+    {
+        LoadedConfig.bUseOpacityTaper = BoolValue;
+    }
+    if (TryGetNumberField(DisplayObject, TEXT("oldest_opacity_scale"), NumberValue))
+    {
+        LoadedConfig.OldestOpacityScale = static_cast<float>(NumberValue);
+    }
+    if (TryGetNumberField(DisplayObject, TEXT("newest_opacity_scale"), NumberValue))
+    {
+        LoadedConfig.NewestOpacityScale = static_cast<float>(NumberValue);
     }
 
     if (TryGetBoolField(ActualTrackingObject, TEXT("enabled"), BoolValue))
@@ -944,10 +1114,22 @@ bool UTrajectoryManager::SaveConfigToFile(const FString& ConfigFilePath) const
     DisplayObject->SetBoolField(TEXT("enable_debug_visualization"), Config.bEnableDebugVisualization);
     DisplayObject->SetBoolField(TEXT("draw_device_label"), Config.bDrawDeviceLabel);
     DisplayObject->SetBoolField(TEXT("draw_direction_arrows"), Config.bDrawDirectionArrows);
+    DisplayObject->SetNumberField(TEXT("direction_arrow_spacing_cm"), Config.DirectionArrowSpacingCm);
+    DisplayObject->SetBoolField(TEXT("draw_terminal_direction_head"), Config.bDrawTerminalDirectionHead);
+    DisplayObject->SetNumberField(TEXT("terminal_direction_head_size_cm"), Config.TerminalDirectionHeadSizeCm);
+    DisplayObject->SetBoolField(TEXT("draw_point_markers"), Config.bDrawPointMarkers);
     DisplayObject->SetNumberField(TEXT("debug_point_size"), Config.DebugPointSize);
     DisplayObject->SetNumberField(TEXT("planned_vertical_offset_cm"), Config.DebugVerticalOffsetCm);
     DisplayObject->SetNumberField(TEXT("actual_vertical_offset_cm"), Config.ActualDebugVerticalOffsetCm);
     DisplayObject->SetNumberField(TEXT("direction_arrow_size_cm"), Config.DirectionArrowSizeCm);
+    DisplayObject->SetBoolField(TEXT("smooth_curve"), Config.bSmoothCurve);
+    DisplayObject->SetNumberField(TEXT("smooth_substeps_per_segment"), Config.SmoothSubstepsPerSegment);
+    DisplayObject->SetBoolField(TEXT("use_width_taper"), Config.bUseWidthTaper);
+    DisplayObject->SetNumberField(TEXT("oldest_width_scale"), Config.OldestWidthScale);
+    DisplayObject->SetNumberField(TEXT("newest_width_scale"), Config.NewestWidthScale);
+    DisplayObject->SetBoolField(TEXT("use_opacity_taper"), Config.bUseOpacityTaper);
+    DisplayObject->SetNumberField(TEXT("oldest_opacity_scale"), Config.OldestOpacityScale);
+    DisplayObject->SetNumberField(TEXT("newest_opacity_scale"), Config.NewestOpacityScale);
     RootObject->SetObjectField(TEXT("display"), DisplayObject);
 
     const TSharedRef<FJsonObject> ActualTrackingObject = MakeShared<FJsonObject>();
@@ -1084,20 +1266,28 @@ void UTrajectoryManager::DrawDebugTrajectories() const
     const float PointRadius = FMath::Max(4.0f, Config.DebugPointSize);
     const float CurrentTime = static_cast<float>(FPlatformTime::Seconds());
 
-    auto MakeSegmentColor = [&](const FDeviceTrajectory& Trajectory, int32 PointIndex) -> FColor
+    auto MakeSegmentColor = [&](const FDeviceTrajectory& Trajectory, const float Timestamp, const float PathAlpha) -> FColor
     {
         const FLinearColor BaseColor =
             (Trajectory.TrajectoryType == ETrajectoryType::Planned ? Config.PlannedColor : Config.ActualColor);
 
-        float FadeFactor = 1.0f;
-        if (Config.bEnableFadeOut && Config.LifetimeSeconds > 0.0f && Trajectory.Points.IsValidIndex(PointIndex))
+        float AgeFade = 1.0f;
+        if (Config.bEnableFadeOut && Config.LifetimeSeconds > 0.0f)
         {
-            const float AgeSeconds = FMath::Max(0.0f, CurrentTime - Trajectory.Points[PointIndex].Timestamp);
-            FadeFactor = 1.0f - FMath::Clamp(AgeSeconds / Config.LifetimeSeconds, 0.0f, 1.0f);
+            const float AgeSeconds = FMath::Max(0.0f, CurrentTime - Timestamp);
+            AgeFade = 1.0f - FMath::Clamp(AgeSeconds / Config.LifetimeSeconds, 0.0f, 1.0f);
         }
 
-        const float Intensity = FMath::Clamp((0.25f + FadeFactor * 0.75f) * FMath::Max(0.1f, Config.Opacity), 0.1f, 1.0f);
-        FLinearColor AdjustedColor = BaseColor * Intensity;
+        const float SpatialAlpha = SmoothStep01(PathAlpha);
+        const float TaperFade = Config.bUseOpacityTaper
+            ? FMath::Lerp(Config.OldestOpacityScale, Config.NewestOpacityScale, SpatialAlpha)
+            : 1.0f;
+        const float Luminance = FMath::Clamp(
+            FMath::Max(0.08f, Config.Opacity) * FMath::Max(0.05f, AgeFade) * FMath::Max(0.05f, TaperFade),
+            0.05f,
+            1.35f);
+
+        FLinearColor AdjustedColor = BaseColor * Luminance;
         AdjustedColor.A = 1.0f;
         return AdjustedColor.ToFColor(true);
     };
@@ -1117,23 +1307,78 @@ void UTrajectoryManager::DrawDebugTrajectories() const
                 ? FMath::Max(0.0f, Config.DebugVerticalOffsetCm)
                 : FMath::Max(0.0f, Config.ActualDebugVerticalOffsetCm));
 
-        FVector PreviousLocation = Trajectory.Points[0].Location + TrajectoryOffset;
-        const FColor StartColor = MakeSegmentColor(Trajectory, 0);
-        DrawDebugSphere(
-            World,
-            PreviousLocation,
-            PointRadius,
-            10,
-            StartColor,
-            false,
-            0.0f,
-            0,
-            FMath::Max(1.0f, LineThickness * 0.15f));
-
-        for (int32 PointIndex = 1; PointIndex < Trajectory.Points.Num(); ++PointIndex)
+        TArray<FVector> RenderPositions;
+        TArray<float> RenderTimestamps;
+        BuildSmoothedTrajectorySamples(Trajectory, TrajectoryOffset, RenderPositions, RenderTimestamps);
+        if (RenderPositions.Num() <= 0 || RenderPositions.Num() != RenderTimestamps.Num())
         {
-            const FVector CurrentLocation = Trajectory.Points[PointIndex].Location + TrajectoryOffset;
-            const FColor SegmentColor = MakeSegmentColor(Trajectory, PointIndex);
+            continue;
+        }
+
+        TArray<float> CumulativeDistances;
+        CumulativeDistances.Reserve(RenderPositions.Num());
+        CumulativeDistances.Add(0.0f);
+        float TotalDistance = 0.0f;
+
+        for (int32 SampleIndex = 1; SampleIndex < RenderPositions.Num(); ++SampleIndex)
+        {
+            TotalDistance += FVector::Distance(RenderPositions[SampleIndex - 1], RenderPositions[SampleIndex]);
+            CumulativeDistances.Add(TotalDistance);
+        }
+
+        const auto GetPathAlphaAtIndex = [&](const int32 Index) -> float
+        {
+            if (TotalDistance <= KINDA_SMALL_NUMBER || !CumulativeDistances.IsValidIndex(Index))
+            {
+                return RenderPositions.Num() <= 1 ? 1.0f : (static_cast<float>(Index) / static_cast<float>(RenderPositions.Num() - 1));
+            }
+
+            return CumulativeDistances[Index] / TotalDistance;
+        };
+
+        if (Config.bDrawPointMarkers)
+        {
+            for (int32 PointIndex = 0; PointIndex < Trajectory.Points.Num(); ++PointIndex)
+            {
+                const FVector MarkerLocation = Trajectory.Points[PointIndex].Location + TrajectoryOffset;
+                const float MarkerPathAlpha = Trajectory.Points.Num() <= 1
+                    ? 1.0f
+                    : (static_cast<float>(PointIndex) / static_cast<float>(Trajectory.Points.Num() - 1));
+                const FColor MarkerColor = MakeSegmentColor(Trajectory, Trajectory.Points[PointIndex].Timestamp, MarkerPathAlpha);
+                const float MarkerRadius = PointIndex == Trajectory.Points.Num() - 1 ? PointRadius : PointRadius * 0.65f;
+
+                DrawDebugSphere(
+                    World,
+                    MarkerLocation,
+                    MarkerRadius,
+                    10,
+                    MarkerColor,
+                    false,
+                    0.0f,
+                    0,
+                    FMath::Max(1.0f, LineThickness * 0.12f));
+            }
+        }
+
+        float ArrowDistanceAccumulator = 0.0f;
+        for (int32 PointIndex = 1; PointIndex < RenderPositions.Num(); ++PointIndex)
+        {
+            const FVector PreviousLocation = RenderPositions[PointIndex - 1];
+            const FVector CurrentLocation = RenderPositions[PointIndex];
+            const float SegmentLength = FVector::Distance(PreviousLocation, CurrentLocation);
+            if (SegmentLength <= KINDA_SMALL_NUMBER)
+            {
+                continue;
+            }
+
+            const float MidPathAlpha = 0.5f * (GetPathAlphaAtIndex(PointIndex - 1) + GetPathAlphaAtIndex(PointIndex));
+            const float SmoothMidAlpha = SmoothStep01(MidPathAlpha);
+            const float WidthScale = Config.bUseWidthTaper
+                ? FMath::Lerp(Config.OldestWidthScale, Config.NewestWidthScale, SmoothMidAlpha)
+                : 1.0f;
+            const float SegmentThickness = FMath::Max(1.0f, LineThickness * WidthScale);
+            const float MidTimestamp = 0.5f * (RenderTimestamps[PointIndex - 1] + RenderTimestamps[PointIndex]);
+            const FColor SegmentColor = MakeSegmentColor(Trajectory, MidTimestamp, MidPathAlpha);
 
             DrawDebugLine(
                 World,
@@ -1143,9 +1388,10 @@ void UTrajectoryManager::DrawDebugTrajectories() const
                 false,
                 0.0f,
                 0,
-                LineThickness);
+                SegmentThickness);
 
-            if (Config.bDrawDirectionArrows && FVector::DistSquared(PreviousLocation, CurrentLocation) > KINDA_SMALL_NUMBER)
+            ArrowDistanceAccumulator += SegmentLength;
+            if (Config.bDrawDirectionArrows && ArrowDistanceAccumulator >= Config.DirectionArrowSpacingCm)
             {
                 DrawDebugDirectionalArrow(
                     World,
@@ -1156,21 +1402,32 @@ void UTrajectoryManager::DrawDebugTrajectories() const
                     false,
                     0.0f,
                     0,
-                    FMath::Max(1.0f, LineThickness * 0.8f));
+                    FMath::Max(1.0f, SegmentThickness * 0.8f));
+                ArrowDistanceAccumulator = 0.0f;
             }
+        }
 
-            DrawDebugSphere(
-                World,
-                CurrentLocation,
-                PointRadius,
-                10,
-                SegmentColor,
-                false,
-                0.0f,
-                0,
-                FMath::Max(1.0f, LineThickness * 0.15f));
-
-            PreviousLocation = CurrentLocation;
+        if (Config.bDrawTerminalDirectionHead && RenderPositions.Num() >= 2)
+        {
+            const FVector TerminalStart = RenderPositions[RenderPositions.Num() - 2];
+            const FVector TerminalEnd = RenderPositions.Last();
+            if (FVector::DistSquared(TerminalStart, TerminalEnd) > KINDA_SMALL_NUMBER)
+            {
+                const FColor TerminalColor = MakeSegmentColor(
+                    Trajectory,
+                    RenderTimestamps.Last(),
+                    1.0f);
+                DrawDebugDirectionalArrow(
+                    World,
+                    TerminalStart,
+                    TerminalEnd,
+                    Config.TerminalDirectionHeadSizeCm,
+                    TerminalColor,
+                    false,
+                    0.0f,
+                    0,
+                    FMath::Max(1.5f, LineThickness));
+            }
         }
 
         if (Config.bDrawDeviceLabel)
@@ -1185,10 +1442,10 @@ void UTrajectoryManager::DrawDebugTrajectories() const
 
             DrawDebugString(
                 World,
-                PreviousLocation + FVector(0.0f, 0.0f, PointRadius * 3.0f),
+                RenderPositions.Last() + FVector(0.0f, 0.0f, PointRadius * 3.0f),
                 DebugLabel,
                 nullptr,
-                MakeSegmentColor(Trajectory, Trajectory.Points.Num() - 1),
+                MakeSegmentColor(Trajectory, RenderTimestamps.Last(), 1.0f),
                 0.0f,
                 false);
         }
